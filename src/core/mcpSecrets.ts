@@ -56,7 +56,10 @@ export function inferSecretKeyValues(values: Record<string, string> | undefined)
   const out: Record<string, string> = {}
   for (const [key, value] of Object.entries(values ?? {})) {
     if (!isSecretLikeKey(key)) continue
-    if (isPlaceholderValue(value)) continue
+    // Authentication schemes are public syntax; only the referenced value is secret.
+    // Literal suffixes and fallback values must still be moved into local.json.
+    const withoutRefs = value.replace(/\$\{[A-Z0-9_]+\}/g, '')
+    if (withoutRefs !== value && /^\s*(?:Bearer|Token|Basic)?\s*$/i.test(withoutRefs)) continue
     out[key] = value
   }
   return out

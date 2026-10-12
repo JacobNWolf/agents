@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- MCP add and import preserve reference-only authorization headers such as `Bearer ${TOKEN}` while keeping literal credentials and fallbacks local.
+
 - Automatic update checks start after the command finishes, so optional metadata writes cannot lock out MCP edits or sync.
 
 - HTTP MCP probes consume matching SSE replies incrementally, handling split UTF-8 and multiline events without waiting for the server to close its stream.
