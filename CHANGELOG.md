@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- No changes yet.
+
+## [0.9.2] - 2026-10-12
+
 ### Fixed
 
 - Plugin export retains shared files and directories beside immediate skills. Grouped exports reject shared group resources or conflicting flattened names before writing, instead of silently breaking relative imports.
@@ -21,9 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Legacy sync and reset ownership comparisons ignore JSON property order while preserving servers whose values or argument order differ.
 
-- Plugin snapshots exclude local files ignored by Git, including inherited rules, local excludes and links to ignored credentials. Export inventories keep bundles in ignored output directories importable without copying later local files.
+- Plugin snapshots exclude local files ignored by Git, including inherited rules, local excludes and links to ignored credentials. Export inventories keep bundles in ignored output directories importable, retain empty runtime directories, exclude later local files and reject changed exported assets.
 
-- Re-exported plugins include their imported runtime snapshots and retain package root variables, while writable plugin data stays private and is recreated on import or sync.
+- Re-exported plugins include their imported runtime snapshots and preserve executable command paths and nested runtime roots, while writable plugin data stays private and is recreated on import, sync or budget.
 
 - MCP add and import preserve reference-only authorization headers such as `Bearer ${TOKEN}` while keeping literal credentials and fallbacks local.
 
@@ -47,11 +51,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - MCP import preserves and validates schema 4 auth, timeout and tool restriction fields, including empty allowlists; OAuth client secrets are kept in local overrides.
 
-- Plugin export flattens grouped skills with their resources and rejects duplicate output names; validation and import count only standard immediate-child skills.
+- Plugin export flattens self-contained grouped skills with resources stored inside each skill and rejects duplicate output names; validation and import count only standard immediate-child skills.
 
 - Plugin export materializes internal skill links portably, retains executable permissions and refuses escaping resources, so its own bundles can be imported after removing their sources.
 
-- Imported plugin servers receive PLUGIN_ROOT and PLUGIN_DATA, with portable, gitignored data storage retained across package updates and recreated by sync or budget after cloning.
+- Imported stdio plugin servers receive PLUGIN_ROOT and PLUGIN_DATA, with portable, gitignored data storage retained across package updates and recreated by sync or budget after cloning.
 
 - Imported plugin command and cwd paths resolve independently against the installed snapshot, remain portable and reject paths escaping its root.
 
@@ -99,11 +103,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Safe reset preserves manual MCP servers and settings in Cursor, Antigravity, VS Code and Junie configs, removing only agents-managed entries.
 
-## [0.9.2] - 2026-10-09
-
-### Fixed
-
-- OpenCode `opencode.json` always includes `"$schema": "https://opencode.ai/config.json"`, matching OpenCode's own config examples. A from-scratch sync (or a CI job that deletes the file and regenerates) previously wrote `{ "mcp": {} }` only, which drifted against committed files that followed the docs.
+- New OpenCode configs and configs with a missing or empty `$schema` receive `"$schema": "https://opencode.ai/config.json"`. Existing nonempty custom schemas and unrelated settings are preserved. A from-scratch sync previously wrote `{ "mcp": {} }` only.
 
 ## [0.9.1] - 2026-09-13
 
