@@ -1,9 +1,11 @@
 import os from 'node:os'
 import path from 'node:path'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { runReset } from '../src/commands/reset.js'
 import { createDefaultAgentsConfig, saveAgentsConfig } from '../src/core/config.js'
+import { performSync } from '../src/core/sync.js'
+import { getProjectPaths } from '../src/core/paths.js'
 
 const tempDirs: string[] = []
 const configs = [
@@ -27,6 +29,42 @@ async function fixture(): Promise<string> {
 }
 
 describe('reset config ownership', () => {
+  it('recovers a legacy preview that uses Windows relative path separators', async () => {
+    const projectRoot = await fixture()
+    await saveAgentsConfig(projectRoot, createDefaultAgentsConfig({ mcpServers: {} }))
+    const paths = getProjectPaths(projectRoot)
+    await mkdir(paths.generatedDir, { recursive: true })
+    await mkdir(path.dirname(paths.copilotCliGithubMcp), { recursive: true })
+    const docs = { command: 'node' }
+    await writeFile(paths.copilotCliGithubMcp, JSON.stringify({ mcpServers: { docs } }))
+    await writeFile(paths.generatedProjectMcpState, JSON.stringify({ files: { [path.join(projectRoot, 'old/.github/mcp.json')]: ['docs'] } }))
+    await writeFile(paths.generatedClaudeProjectMcp, JSON.stringify({ files: { '.github\\mcp.json': { docs } } }))
+    await runReset({ projectRoot, localOnly: false, hard: false })
+    await expect(readFile(paths.copilotCliGithubMcp)).rejects.toThrow()
+  })
+
+  it.each([false, true])('cleans relocated project MCP ownership (legacy absolute state=%s)', async legacy => {
+    const parent = await fixture()
+    vi.stubEnv('PATH', '')
+    const projectRoot = path.join(parent, 'before')
+    const config = createDefaultAgentsConfig({ enabledIntegrations: ['claude'], mcpServers: {
+      docs: { transport: 'stdio', command: 'node' }
+    } })
+    config.integrations.options.claudeScope = 'project'
+    await saveAgentsConfig(projectRoot, config)
+    await performSync({ projectRoot, check: false, verbose: false })
+    const paths = getProjectPaths(projectRoot)
+    if (legacy) await writeFile(paths.generatedProjectMcpState, JSON.stringify({ files: { [paths.copilotCliMcp]: ['docs'] } }))
+    await mkdir(path.join(projectRoot, '.github'), { recursive: true })
+    const manual = { mcpServers: { docs: { command: 'manual' } } }
+    await writeFile(paths.copilotCliGithubMcp, JSON.stringify(manual))
+    const moved = path.join(parent, 'after')
+    await rename(projectRoot, moved)
+    await runReset({ projectRoot: moved, localOnly: false, hard: false })
+    await expect(readFile(path.join(moved, '.mcp.json'))).rejects.toThrow()
+    expect(JSON.parse(await readFile(path.join(moved, '.github/mcp.json'), 'utf8'))).toEqual(manual)
+  })
+
   it.each([true, false])('preserves same-named manual project MCP with applied state (managed=%s)', async managed => {
     const projectRoot = await fixture()
     await saveAgentsConfig(projectRoot, createDefaultAgentsConfig({ mcpServers: {

@@ -63,8 +63,8 @@ describe('shared project .mcp.json', () => {
     await writeFile(paths.copilotCliMcp, '{ broken')
     await expect(performSync({ projectRoot, check: false, verbose: false })).rejects.toThrow(/Sync incomplete/)
     const state = JSON.parse(await readFile(paths.generatedProjectMcpState, 'utf8'))
-    expect(state.files[paths.copilotCliGithubMcp].sort()).toEqual(['api', 'docs'])
-    expect(state.files[paths.copilotCliMcp].sort()).toEqual(['api', 'docs'])
+    expect(state.files['.github/mcp.json'].sort()).toEqual(['api', 'docs'])
+    expect(state.files['.mcp.json'].sort()).toEqual(['api', 'docs'])
     await writeFile(paths.copilotCliMcp, previous)
     config.mcp.servers = {}
     await saveAgentsConfig(projectRoot, config)

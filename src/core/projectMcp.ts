@@ -1,4 +1,6 @@
 import path from 'node:path'
+import { isDeepStrictEqual } from 'node:util'
+import { getProjectPaths } from './paths.js'
 import { ensureDir, pathExists, readJson, removeIfExists, writeJsonAtomic } from './fs.js'
 import { toChangedEntry, writeManagedFile } from './managedFiles.js'
 import { renderProjectMcpJson } from './renderers.js'
@@ -165,25 +167,34 @@ async function readStateFiles(statePath: string, projectRoot: string): Promise<R
   if (!(await pathExists(statePath))) return {}
   try {
     const parsed = await readJson<ProjectMcpStateFile & ProjectMcpState>(statePath)
-    if (parsed.files && typeof parsed.files === 'object' && !Array.isArray(parsed.files)) {
-      return Object.fromEntries(
-        Object.entries(parsed.files)
-          .filter(([file]) => isManagedProjectMcpPath(projectRoot, file))
-          .map(([file, names]) => [
-            file,
-            Array.isArray(names) ? names.filter((name): name is string => typeof name === 'string') : []
-          ]),
-      )
+    const files = isRecord(parsed.files) ? parsed.files
+      : typeof parsed.targetPath === 'string' ? { [parsed.targetPath]: parsed.managedNames } : {}
+    const managed: Record<string, string[]> = {}
+    for (const [file, values] of Object.entries(files)) {
+      const names = Array.isArray(values) ? values.filter((name): name is string => typeof name === 'string') : []
+      const target = path.resolve(projectRoot, file)
+      if (isManagedProjectMcpPath(projectRoot, target) && (path.isAbsolute(file) || ['.mcp.json', '.github/mcp.json'].includes(file))) {
+        managed[target] = names
+      } else if (path.isAbsolute(file)) {
+        // An old absolute record may have moved with the project. Only re-adopt
+        // entries whose relative preview still matches the current local file.
+        const relative = path.basename(file) === '.mcp.json' ? '.mcp.json'
+          : path.basename(file) === 'mcp.json' && path.basename(path.dirname(file)) === '.github' ? '.github/mcp.json' : undefined
+        if (!relative) continue
+        try {
+          const preview = await readJson<{ files?: Record<string, unknown> }>(getProjectPaths(projectRoot).generatedClaudeProjectMcp)
+          const currentPath = path.join(projectRoot, relative)
+          const current = await readJson<{ mcpServers?: Record<string, unknown> }>(currentPath)
+          const expected = preview.files?.[relative] ?? preview.files?.[relative.replaceAll('/', '\\')]
+          if (isRecord(expected) && isRecord(current.mcpServers) && managed[currentPath] === undefined) {
+            managed[currentPath] = names.filter(name => Object.hasOwn(expected, name) && isDeepStrictEqual(current.mcpServers![name], expected[name]))
+          }
+        } catch {
+          // Missing or invalid evidence must not claim a manually configured server.
+        }
+      }
     }
-    // Older state files tracked a single path.
-    if (
-      typeof parsed.targetPath === 'string'
-      && Array.isArray(parsed.managedNames)
-      && isManagedProjectMcpPath(projectRoot, parsed.targetPath)
-    ) {
-      return { [parsed.targetPath]: parsed.managedNames.filter((name): name is string => typeof name === 'string') }
-    }
-    return {}
+    return managed
   } catch {
     return {}
   }
@@ -206,14 +217,14 @@ function isManagedProjectMcpPath(projectRoot: string, candidate: string): boolea
 }
 
 /** Persist which servers agents owns in each project MCP file. */
-async function writeStateFiles(statePath: string, files: Record<string, string[]>): Promise<void> {
+async function writeStateFiles(statePath: string, files: Record<string, string[]>, projectRoot: string): Promise<void> {
   await ensureDir(path.dirname(statePath))
   await writeJsonAtomic(statePath, {
     files: Object.fromEntries(
       Object.entries(files)
         .filter(([, names]) => names.length > 0)
         .sort(([a], [b]) => a.localeCompare(b))
-        .map(([file, names]) => [file, [...new Set(names)].sort((a, b) => a.localeCompare(b))]),
+        .map(([file, names]) => [path.relative(projectRoot, file).split(path.sep).join('/'), [...new Set(names)].sort((a, b) => a.localeCompare(b))]),
     )
   })
 }
@@ -254,7 +265,7 @@ export async function syncProjectMcpFile(args: {
     warnings.push(...rendered.warnings)
     // Keyed per file: with two targets a merged preview would hide which server
     // belongs where, and identical names would shadow each other.
-    generatedPreview[path.relative(projectRoot, target.targetPath) || target.targetPath] = rendered.mcpServers
+    generatedPreview[path.relative(projectRoot, target.targetPath).split(path.sep).join('/') || target.targetPath] = rendered.mcpServers
 
     const previousManagedNames = previousFiles[target.targetPath] ?? (hasState ? [] : knownServerNames ?? [])
     try {
@@ -307,7 +318,7 @@ export async function syncProjectMcpFile(args: {
   }
 
   if (!check) {
-    await writeStateFiles(statePath, nextFiles)
+    await writeStateFiles(statePath, nextFiles, projectRoot)
   }
   if (errors.length > 0) throw new Error(errors.join('\n'))
 }

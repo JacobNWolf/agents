@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Project MCP ownership uses portable relative paths; moved legacy projects recover ownership only where the saved preview still matches the local config.
+
 - Legacy sync and reset ownership comparisons ignore JSON property order while preserving servers whose values or argument order differ.
 
 - Plugin snapshots exclude local files ignored by Git, including inherited rules, local excludes and links to ignored credentials. Export inventories keep bundles in ignored output directories importable without copying later local files.
