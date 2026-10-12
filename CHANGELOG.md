@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Automatic update checks start after the command finishes, so optional metadata writes cannot lock out MCP edits or sync.
+
 - HTTP MCP probes consume matching SSE replies incrementally, handling split UTF-8 and multiline events without waiting for the server to close its stream.
 
 - HTTP MCP budget uses one per-server deadline across protocol negotiation, initialization and every tools/list page instead of resetting the timeout for each request.
