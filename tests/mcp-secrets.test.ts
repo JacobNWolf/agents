@@ -2,6 +2,15 @@ import { describe, expect, it } from 'vitest'
 import { inferSecretArgs, splitServerSecrets } from '../src/core/mcpSecrets.js'
 
 describe('mcp secrets', () => {
+  it('keeps imported OAuth client secrets in local overrides', () => {
+    const split = splitServerSecrets({ name: 'docs', server: {
+      transport: 'http', url: 'https://example.com/mcp', oauth: { clientId: 'client', clientSecret: 'fixture-secret' }
+    } })
+    expect(split.publicServer.oauth?.clientId).toBe('client')
+    expect(split.publicServer.oauth?.clientSecret).toMatch(/^\$\{[A-Z0-9_]+\}$/)
+    expect(split.localOverride.oauth?.clientSecret).toBe('fixture-secret')
+  })
+
   it('moves secret env/header values to local override and keeps placeholders in public config', () => {
     const split = splitServerSecrets({
       name: 'context7',

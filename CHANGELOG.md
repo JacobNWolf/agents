@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- MCP import preserves and validates schema 4 auth, timeout and tool restriction fields, including empty allowlists; OAuth client secrets are kept in local overrides.
+
 - Plugin export flattens grouped skills with their resources and rejects duplicate output names; validation and import count only standard immediate-child skills.
 
 - Plugin export materializes internal skill links portably, retains executable permissions and refuses escaping resources, so its own bundles can be imported after removing their sources.

@@ -75,6 +75,12 @@ export function splitServerSecrets(input: {
   const publicServer: McpServerDefinition = JSON.parse(JSON.stringify(input.server)) as McpServerDefinition
   const localOverride: Partial<McpServerDefinition> = {}
 
+  const clientSecret = publicServer.oauth?.clientSecret
+  if (clientSecret && !isPlaceholderValue(clientSecret)) {
+    publicServer.oauth!.clientSecret = toPlaceholder(input.name, 'oauth_clientSecret')
+    localOverride.oauth = { clientSecret }
+  }
+
   const secretEnv = input.secretEnv ?? {}
   const secretEnvKeys = new Set<string>([...Object.keys(secretEnv), ...(input.secretEnvKeys ?? [])])
   if (secretEnvKeys.size > 0) {
