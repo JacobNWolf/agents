@@ -12,6 +12,23 @@ afterEach(() => {
 })
 
 describe('parseImportedServers', () => {
+  it('retains all schema 4 connection, auth and tool restriction fields', () => {
+    const server = {
+      transport: 'http', url: 'https://example.com/mcp', timeout: 0, connectTimeout: 500,
+      tools: [], disabledTools: ['write'], oauth: { clientId: 'client', scopes: 'read', clientSecret: '${CLIENT_SECRET}', authServerMetadataUrl: 'https://example.com/auth' },
+      headersHelper: '${PROJECT_ROOT}/headers', bearerTokenEnvVar: 'API_TOKEN', envFile: '${PROJECT_ROOT}/.env'
+    }
+    expect(parseImportedServers(JSON.stringify({ mcp: { servers: { docs: server } } }))[0].server).toEqual(server)
+  })
+
+  it.each([
+    { timeout: -1 }, { connectTimeout: '500' }, { tools: ['read', 5] },
+    { disabledTools: 'write' }, { oauth: false }, { oauth: { clientId: 5 } },
+    { headersHelper: 5 }, { bearerTokenEnvVar: 'BAD KEY' }, { envFile: 5 }
+  ])('rejects invalid schema 4 field values: %j', fields => {
+    expect(() => parseImportedServers(JSON.stringify({ docs: { url: 'https://example.com/mcp', ...fields } }))).toThrow()
+  })
+
   it('parses { mcp: { servers } } shape', () => {
     const payload = JSON.stringify({
       mcp: {

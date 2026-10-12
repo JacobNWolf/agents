@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process'
+import { pluginProjectRoot, syncPluginData } from './pluginRuntime.js'
 import { CLI_VERSION } from './version.js'
 import type { ResolvedMcpServer } from '../types.js'
 
@@ -495,9 +496,46 @@ async function postJsonRpc(
       body: JSON.stringify(body),
       signal: controller.signal
     })
-    return { response, text: await response.text() }
+    const requestId = typeof body === 'object' && body !== null && 'id' in body ? body.id : undefined
+    const streaming = (response.headers.get('content-type') ?? '').toLowerCase().includes('text/event-stream')
+    const text = streaming && (typeof requestId === 'number' || typeof requestId === 'string')
+      ? await readSseReply(response, requestId) : await response.text()
+    return { response, text }
   } finally {
     clearTimeout(timer)
+  }
+}
+
+/** Stop reading an SSE POST as soon as its matching JSON-RPC reply is complete. */
+async function readSseReply(response: Response, requestId: string | number): Promise<string> {
+  if (!response.body) return ''
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  const reply = (event: string): string | undefined => {
+    const message = parseRpcBody(event)
+    if (message?.id !== requestId || typeof message.method === 'string') return undefined
+    if (message.result === undefined && message.error === undefined) return undefined
+    return JSON.stringify(message)
+  }
+  try {
+    for (;;) {
+      const chunk = await reader.read()
+      if (chunk.done) return reply(buffer + decoder.decode()) ?? ''
+      buffer += decoder.decode(chunk.value, { stream: true })
+      let boundary: RegExpExecArray | null
+      while ((boundary = /\r?\n\r?\n/.exec(buffer)) !== null) {
+        const event = buffer.slice(0, boundary.index)
+        buffer = buffer.slice(boundary.index + boundary[0].length)
+        const text = reply(event)
+        if (text !== undefined) {
+          await reader.cancel().catch(() => {})
+          return text
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock()
   }
 }
 
@@ -591,7 +629,7 @@ async function probeLegacyHttpServer(
   server: ResolvedMcpServer,
   baseHeaders: Record<string, string>,
   version: string,
-  timeoutMs: number,
+  remainingMs: () => number,
 ): Promise<ProbeResult> {
   const url = server.url as string
   const headers = { ...baseHeaders }
@@ -605,7 +643,7 @@ async function probeLegacyHttpServer(
       method: 'initialize',
       params: { protocolVersion: version, capabilities: {}, clientInfo: CLIENT_INFO }
     },
-    timeoutMs,
+    remainingMs(),
   )
 
   if (!init.response.ok) {
@@ -628,7 +666,7 @@ async function probeLegacyHttpServer(
   headers['mcp-protocol-version'] = negotiated
 
   try {
-    await postJsonRpc(url, headers, { jsonrpc: '2.0', method: 'notifications/initialized' }, timeoutMs)
+    await postJsonRpc(url, headers, { jsonrpc: '2.0', method: 'notifications/initialized' }, remainingMs())
   } catch {
     // A server that does not accept the notification still answers tools/list.
   }
@@ -646,7 +684,7 @@ async function probeLegacyHttpServer(
         method: 'tools/list',
         params: cursor === undefined ? {} : { cursor }
       },
-      timeoutMs,
+      remainingMs(),
     )
 
     if (!list.response.ok) {
@@ -676,6 +714,7 @@ async function probeLegacyHttpServer(
     if (cursor === undefined) break
   }
 
+  remainingMs()
   return { server: server.name, ok: true, tools, characters }
 }
 
@@ -710,9 +749,24 @@ async function probeHttpServer(server: ResolvedMcpServer, timeoutMs: number): Pr
     error
   })
 
+  const tokenVariable = server.bearerTokenEnvVar
+  if (tokenVariable && !Object.keys(baseHeaders).some(key => key.toLowerCase() === 'authorization')) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(tokenVariable)) return fail('Invalid bearer token environment variable name.')
+    const token = process.env[tokenVariable]
+    if (!token) return fail(`Bearer token environment variable is not set: ${tokenVariable}`)
+    if (/[^\x20-\x7e]/.test(token)) return fail(`Bearer token environment variable contains invalid header characters: ${tokenVariable}`)
+    baseHeaders.Authorization = `Bearer ${token}`
+  }
+
   try {
     let version = PROTOCOL_VERSION
-    let attempt = await requestModernToolsList(url, baseHeaders, version, timeoutMs)
+    const deadline = performance.now() + timeoutMs
+    const remainingMs = (): number => {
+      const remaining = deadline - performance.now()
+      if (remaining <= 0) throw new DOMException('Server deadline expired', 'AbortError')
+      return remaining
+    }
+    let attempt = await requestModernToolsList(url, baseHeaders, version, remainingMs())
     let message = parseRpcBody(attempt.text)
 
     if (message?.error?.code === UNSUPPORTED_PROTOCOL_VERSION) {
@@ -721,10 +775,10 @@ async function probeHttpServer(server: ResolvedMcpServer, timeoutMs: number): Pr
         return fail(message.error.message ?? 'server supports no protocol version this CLI speaks')
       }
       if (choice.era === 'legacy') {
-        return await probeLegacyHttpServer(server, baseHeaders, choice.version, timeoutMs)
+        return await probeLegacyHttpServer(server, baseHeaders, choice.version, remainingMs)
       }
       version = choice.version
-      attempt = await requestModernToolsList(url, baseHeaders, version, timeoutMs)
+      attempt = await requestModernToolsList(url, baseHeaders, version, remainingMs())
       message = parseRpcBody(attempt.text)
     }
 
@@ -738,7 +792,7 @@ async function probeHttpServer(server: ResolvedMcpServer, timeoutMs: number): Pr
     }
 
     if (!attempt.response.ok || !message || message.error || message.result === undefined) {
-      return await probeLegacyHttpServer(server, baseHeaders, LEGACY_PROTOCOL_VERSION, timeoutMs)
+      return await probeLegacyHttpServer(server, baseHeaders, LEGACY_PROTOCOL_VERSION, remainingMs)
     }
 
     const tools: ProbedTool[] = []
@@ -755,13 +809,14 @@ async function probeHttpServer(server: ResolvedMcpServer, timeoutMs: number): Pr
       page += 1
       if (cursor === undefined || page >= MAX_TOOL_PAGES) break
 
-      attempt = await requestModernToolsList(url, baseHeaders, version, timeoutMs, cursor)
+      attempt = await requestModernToolsList(url, baseHeaders, version, remainingMs(), cursor)
       message = parseRpcBody(attempt.text)
       if (!attempt.response.ok || !message || message.error || message.result === undefined) {
         return fail(message?.error?.message ?? `tools/list page returned HTTP ${String(attempt.response.status)}`)
       }
     }
 
+    remainingMs()
     return { server: server.name, ok: true, tools, characters }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
@@ -796,6 +851,15 @@ export async function probeServerTools(server: ResolvedMcpServer, timeoutMs = 15
       tools: [],
       characters: 0,
       skipped: 'unresolved ${VAR} placeholder'
+    }
+  }
+
+  const projectRoot = pluginProjectRoot(server)
+  if (server.transport === 'stdio' && projectRoot) {
+    try {
+      await syncPluginData(projectRoot, [server], false, [])
+    } catch (error) {
+      return { server: server.name, ok: false, tools: [], characters: 0, error: error instanceof Error ? error.message : String(error) }
     }
   }
 

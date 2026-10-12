@@ -5,9 +5,17 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { runInit } from '../src/commands/init.js'
 import { runMcpAdd } from '../src/commands/mcp-add.js'
 import { runMcpTest } from '../src/commands/mcp-test.js'
+import { loadAgentsConfig, saveAgentsConfig } from '../src/core/config.js'
 
 const tempDirs: string[] = []
 let previousPathEnv: string | undefined
+
+async function setupRuntimeProject(projectRoot: string): Promise<void> {
+  await runInit({ projectRoot, force: true })
+  const config = await loadAgentsConfig(projectRoot)
+  config.integrations.enabled = ['claude', 'gemini', 'cursor', 'claude_desktop']
+  await saveAgentsConfig(projectRoot, config)
+}
 
 afterEach(async () => {
   if (previousPathEnv === undefined) {
@@ -29,7 +37,7 @@ describe.sequential('mcp test runtime mode', () => {
     const binDir = await mkdtemp(path.join(os.tmpdir(), 'agents-mcp-runtime-bin-'))
     tempDirs.push(projectRoot, binDir)
 
-    await runInit({ projectRoot, force: true })
+    await setupRuntimeProject(projectRoot)
     await runMcpAdd({
       projectRoot,
       name: 'docs',
@@ -99,7 +107,7 @@ describe.sequential('mcp test runtime mode', () => {
     const binDir = await mkdtemp(path.join(os.tmpdir(), 'agents-mcp-runtime-bin-'))
     tempDirs.push(projectRoot, binDir)
 
-    await runInit({ projectRoot, force: true })
+    await setupRuntimeProject(projectRoot)
     await runMcpAdd({
       projectRoot,
       name: 'docs',
@@ -146,7 +154,7 @@ describe.sequential('mcp test runtime mode', () => {
     const projectRoot = await mkdtemp(path.join(os.tmpdir(), 'agents-mcp-runtime-'))
     tempDirs.push(projectRoot)
 
-    await runInit({ projectRoot, force: true })
+    await setupRuntimeProject(projectRoot)
     await runMcpAdd({
       projectRoot,
       name: 'docs',
@@ -202,7 +210,7 @@ describe.sequential('mcp test runtime mode', () => {
     const projectRoot = await mkdtemp(path.join(os.tmpdir(), 'agents-mcp-runtime-'))
     tempDirs.push(projectRoot)
 
-    await runInit({ projectRoot, force: true })
+    await setupRuntimeProject(projectRoot)
     await runMcpAdd({
       projectRoot,
       name: 'docs',

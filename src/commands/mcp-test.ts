@@ -1,13 +1,11 @@
 import path from 'node:path'
 import { listMcpEntries, loadMcpState, type McpServerEntry } from '../core/mcpCrud.js'
+import { resolveFromConfigAndLocal, resolveServer } from '../core/mcp.js'
 import { commandExists, runCommand } from '../core/shell.js'
 import { listCursorMcpStatuses, sanitizeTerminalOutput, type CursorServerState } from '../core/cursorCli.js'
 import { toManagedClaudeName } from '../integrations/claude.js'
-import { INTEGRATION_IDS } from '../integrations/registry.js'
 import * as ui from '../core/ui.js'
 import type { IntegrationName, McpServerDefinition } from '../types.js'
-
-const ALL_INTEGRATIONS: IntegrationName[] = INTEGRATION_IDS
 
 const DEFAULT_RUNTIME_TIMEOUT_MS = 8000
 
@@ -74,8 +72,21 @@ export async function runMcpTest(options: McpTestOptions): Promise<void> {
     spin.start('Running runtime checks...')
   }
 
+  const runtimeTargets = new Map<string, IntegrationName[]>()
+  if (runtimeEnabled) {
+    const registry = resolveFromConfigAndLocal({
+      projectRoot: path.resolve(options.projectRoot), servers: state.config.mcp.servers, local: state.local,
+      profile: state.config.activeProfile ? state.config.profiles?.[state.config.activeProfile] : undefined
+    })
+    for (const id of state.config.integrations.enabled) {
+      for (const server of registry.serversByTarget[id]) {
+        runtimeTargets.set(server.name, [...(runtimeTargets.get(server.name) ?? []), id])
+      }
+    }
+  }
   const runtime = runtimeEnabled
-    ? runRuntimeChecks(filtered, options.projectRoot, runtimeTimeoutMs)
+    ? runRuntimeChecks(filtered.filter(entry => entry.mergedServer.enabled !== false && runtimeTargets.has(entry.name)),
+      options.projectRoot, runtimeTimeoutMs, runtimeTargets)
     : null
 
   if (runtimeEnabled) {
@@ -83,7 +94,10 @@ export async function runMcpTest(options: McpTestOptions): Promise<void> {
   }
 
   const results: ServerTestResult[] = filtered.map((entry) => {
-    const tested = testServer(entry.name, entry.mergedServer)
+    const tested = testServer(entry.name, {
+      ...entry.mergedServer,
+      ...resolveServer(entry.name, entry.mergedServer, path.resolve(options.projectRoot), [])
+    }, entry.mergedServer)
     if (runtimeEnabled && runtime) {
       tested.runtime = runtime.perServer[entry.name] ?? {}
     }
@@ -176,7 +190,7 @@ export async function runMcpTest(options: McpTestOptions): Promise<void> {
   }
 }
 
-function testServer(name: string, server: McpServerDefinition): ServerTestResult {
+function testServer(name: string, server: McpServerDefinition, display: McpServerDefinition): ServerTestResult {
   const messages: string[] = []
 
   if (server.enabled === false) {
@@ -196,13 +210,13 @@ function testServer(name: string, server: McpServerDefinition): ServerTestResult
     if (!server.command) {
       messages.push('missing command')
     } else if (!commandExists(server.command)) {
-      messages.push(`command not found in PATH: ${sanitizeTerminalOutput(server.command)}`)
+      messages.push(`command not found in PATH: ${sanitizeTerminalOutput(display.command ?? '')}`)
     }
   } else {
     if (!server.url) {
       messages.push('missing url')
     } else if (!isValidHttpUrl(server.url)) {
-      messages.push(`invalid URL: ${sanitizeTerminalOutput(server.url)}`)
+      messages.push(`invalid URL: ${sanitizeTerminalOutput(display.url ?? '')}`)
     }
   }
 
@@ -220,10 +234,13 @@ function testServer(name: string, server: McpServerDefinition): ServerTestResult
  * Only Claude Code, Gemini CLI and Cursor expose their MCP state; everything else is
  * reported as unsupported so the output stays honest.
  */
-function runRuntimeChecks(entries: McpServerEntry[], projectRoot: string, timeoutMs: number): RuntimeCheckResult {
-  const claudeProbe = probeClaude(projectRoot, timeoutMs)
-  const geminiProbe = probeGemini(projectRoot, timeoutMs)
-  const cursorProbe = probeCursor(projectRoot, timeoutMs)
+function runRuntimeChecks(entries: McpServerEntry[], projectRoot: string, timeoutMs: number, targetsByName: Map<string, IntegrationName[]>): RuntimeCheckResult {
+  if (entries.length === 0) return { perServer: {}, availableIntegrations: [], errors: 0 }
+  const needed = new Set(entries.flatMap(entry => targetsByName.get(entry.name) ?? []))
+  const skipped = { available: false, detail: 'Integration is not enabled for the selected servers.' }
+  const claudeProbe = needed.has('claude') ? probeClaude(projectRoot, timeoutMs) : skipped
+  const geminiProbe = needed.has('gemini') ? probeGemini(projectRoot, timeoutMs) : skipped
+  const cursorProbe = needed.has('cursor') ? probeCursor(projectRoot, timeoutMs) : skipped
 
   const availableIntegrations: IntegrationName[] = []
   if (claudeProbe.available) availableIntegrations.push('claude')
@@ -234,7 +251,7 @@ function runRuntimeChecks(entries: McpServerEntry[], projectRoot: string, timeou
   let errors = 0
 
   for (const entry of entries) {
-    const targets = resolveTargets(entry.server)
+    const targets = targetsByName.get(entry.name) ?? []
     const runtimeByIntegration: Partial<Record<IntegrationName, RuntimeIntegrationResult>> = {}
 
     for (const integration of targets) {
@@ -521,13 +538,6 @@ function parseGeminiRuntimeStatuses(output: string): Record<string, GeminiRuntim
   }
 
   return statuses
-}
-
-function resolveTargets(server: McpServerDefinition): IntegrationName[] {
-  if (!server.targets || server.targets.length === 0) {
-    return ALL_INTEGRATIONS
-  }
-  return [...new Set(server.targets)]
 }
 
 function isValidHttpUrl(value: string): boolean {

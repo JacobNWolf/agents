@@ -11,16 +11,21 @@ export interface ProjectPaths {
   rootClaudeMd: string
   agentsReadme: string
   agentsSkillsDir: string
+  agentsPluginDataDir: string
   generatedDir: string
   generatedCodex: string
+  generatedGeminiState: string
   generatedGemini: string
+  generatedCopilotState: string
   generatedCopilot: string
   generatedCopilotCli: string
+  generatedCursorMcpState: string
   generatedCursor: string
   generatedAntigravity: string
   generatedAntigravityState: string
   generatedWindsurf: string
   generatedWindsurfState: string
+  generatedOpencodeState: string
   generatedOpencode: string
   generatedClaude: string
   generatedClaudeDesktop: string
@@ -49,6 +54,7 @@ export interface ProjectPaths {
   windsurfDir: string
   opencodeDir: string
   claudeDir: string
+  generatedJunieState: string
   generatedJunie: string
   junieDir: string
   junieMcpDir: string
@@ -227,16 +233,21 @@ export function getProjectPaths(projectRoot: string): ProjectPaths {
     rootClaudeMd: path.join(root, 'CLAUDE.md'),
     agentsReadme: path.join(agentsDir, 'README.md'),
     agentsSkillsDir: path.join(agentsDir, 'skills'),
+    agentsPluginDataDir: path.join(agentsDir, 'plugin-data'),
     generatedDir,
     generatedCodex: path.join(generatedDir, 'codex.config.toml'),
+    generatedGeminiState: path.join(generatedDir, 'gemini.state.json'),
     generatedGemini: path.join(generatedDir, 'gemini.settings.json'),
+    generatedCopilotState: path.join(generatedDir, 'copilot.vscode.state.json'),
     generatedCopilot: path.join(generatedDir, 'copilot.vscode.mcp.json'),
     generatedCopilotCli: path.join(generatedDir, 'copilot.cli.mcp.json'),
+    generatedCursorMcpState: path.join(generatedDir, 'cursor.mcp.state.json'),
     generatedCursor: path.join(generatedDir, 'cursor.mcp.json'),
     generatedAntigravity: path.join(generatedDir, 'antigravity.mcp_config.json'),
     generatedAntigravityState: path.join(generatedDir, 'antigravity.state.json'),
     generatedWindsurf: path.join(generatedDir, 'windsurf.mcp.json'),
     generatedWindsurfState: path.join(generatedDir, 'windsurf.state.json'),
+    generatedOpencodeState: path.join(generatedDir, 'opencode.state.json'),
     generatedOpencode: path.join(generatedDir, 'opencode.json'),
     generatedClaude: path.join(generatedDir, 'claude.mcp.json'),
     generatedClaudeDesktop: path.join(generatedDir, 'claude-desktop.mcp.json'),
@@ -265,6 +276,7 @@ export function getProjectPaths(projectRoot: string): ProjectPaths {
     windsurfDir: path.join(root, '.windsurf'),
     opencodeDir: getOpencodeDir(root, homeDir),
     claudeDir: path.join(root, '.claude'),
+    generatedJunieState: path.join(generatedDir, 'junie.state.json'),
     generatedJunie: path.join(generatedDir, 'junie.mcp.json'),
     junieDir: path.join(root, '.junie'),
     junieMcpDir: path.join(root, '.junie', 'mcp'),

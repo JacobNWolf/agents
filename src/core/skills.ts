@@ -328,6 +328,9 @@ async function findEscapingLink(
   visited: Set<string> = new Set<string>(),
 ): Promise<string | undefined> {
   const resolvedDir = await resolveDirectoryPath(currentDir)
+  if (!isInside(root, resolvedDir)) {
+    return path.relative(skillRoot, currentDir) || '.'
+  }
   if (visited.has(resolvedDir)) return undefined
   visited.add(resolvedDir)
 

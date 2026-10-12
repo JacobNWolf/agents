@@ -1,6 +1,7 @@
 import os from 'node:os'
+import { spawnSync } from 'node:child_process'
 import path from 'node:path'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { afterEach, describe, expect, it } from 'vitest'
 import { runInit } from '../src/commands/init.js'
 import { runPluginExport } from '../src/commands/plugin.js'
@@ -56,6 +57,61 @@ afterEach(async () => {
 })
 
 describe('agent plugin export', () => {
+  it('exports grouped skills as immediate children with their resources', async () => {
+    const projectRoot = await makeProject()
+    await rm(path.join(projectRoot, '.agents/skills'), { recursive: true })
+    const skill = path.join(projectRoot, '.agents/skills/team/nested')
+    await mkdir(path.join(skill, 'scripts'), { recursive: true })
+    await writeFile(path.join(skill, 'SKILL.md'), '---\nname: nested\ndescription: fixture\n---\n')
+    await writeFile(path.join(skill, 'scripts/run.js'), 'fixture resource')
+    const outDir = path.join(projectRoot, 'bundle')
+    const result = await exportPlugin({ projectRoot, outDir, name: 'nested' })
+    expect(result.skillCount).toBe(1)
+    expect(await pathExists(path.join(outDir, 'skills/nested/SKILL.md'))).toBe(true)
+    expect(await readFile(path.join(outDir, 'skills/nested/scripts/run.js'), 'utf8')).toBe('fixture resource')
+    expect((await validatePlugin(outDir)).skillCount).toBe(1)
+  })
+
+  it('rejects duplicate flattened skill names before writing a package', async () => {
+    const projectRoot = await makeProject()
+    for (const group of ['a', 'b']) {
+      const skill = path.join(projectRoot, '.agents/skills', group, 'duplicate')
+      await mkdir(skill, { recursive: true })
+      await writeFile(path.join(skill, 'SKILL.md'), '---\nname: duplicate\ndescription: fixture\n---\n')
+    }
+    const outDir = path.join(projectRoot, 'bundle')
+    await expect(exportPlugin({ projectRoot, outDir, name: 'duplicates' })).rejects.toThrow(/duplicate/i)
+    expect(await pathExists(outDir)).toBe(false)
+  })
+
+  it.each([false, true])('exports internal skill links portably (absolute=%s)', async absolute => {
+    const projectRoot = await makeProject()
+    const skill = path.join(projectRoot, '.agents/skills/links')
+    await mkdir(skill, { recursive: true })
+    await writeFile(path.join(skill, 'SKILL.md'), '---\nname: links\ndescription: fixture\n---\n')
+    await writeFile(path.join(skill, 'data.txt'), 'portable fixture')
+    await symlink(absolute ? path.join(skill, 'data.txt') : 'data.txt', path.join(skill, 'alias.txt'))
+    const outDir = path.join(projectRoot, 'bundle')
+    await exportPlugin({ projectRoot, outDir, name: 'links' })
+    await rm(skill, { recursive: true })
+    expect(await readFile(path.join(outDir, 'skills/links/alias.txt'), 'utf8')).toBe('portable fixture')
+    const target = await makeProject()
+    await expect(importPlugin({ projectRoot: target, pluginDir: outDir })).resolves.toBeDefined()
+  })
+
+  it('refuses to copy an escaping skill resource into an exported package', async () => {
+    const projectRoot = await makeProject()
+    const skill = path.join(projectRoot, '.agents/skills/leak')
+    await mkdir(skill, { recursive: true })
+    await writeFile(path.join(skill, 'SKILL.md'), '---\nname: leak\ndescription: fixture\n---\n')
+    const outside = path.join(projectRoot, 'private.txt')
+    await writeFile(outside, 'private fixture')
+    await symlink(outside, path.join(skill, 'private.txt'))
+    const outDir = path.join(projectRoot, 'bundle')
+    await expect(exportPlugin({ projectRoot, outDir, name: 'leak' })).rejects.toThrow(/outside/)
+    expect(await pathExists(path.join(outDir, 'skills/leak/private.txt'))).toBe(false)
+  })
+
   it('writes a manifest and mcp.json that match the specification', async () => {
     const projectRoot = await makeProject()
     const outDir = path.join(projectRoot, 'dist', 'plugin')
@@ -225,6 +281,55 @@ describe('agent plugin import', () => {
     expect(after.mcp.servers['team-stack.legacy']?.transport).toBe('sse')
   })
 
+  it('keeps plugin runtime assets portable and usable after the source is deleted', async () => {
+    const source = await makeProject()
+    const pluginDir = path.join(source, 'dist/plugin')
+    await exportPlugin({ projectRoot: source, outDir: pluginDir, name: 'runtime' })
+    // This fixture adds a hand-authored runtime after export.
+    await rm(path.join(pluginDir, '.agents-export.json'))
+    await mkdir(path.join(pluginDir, 'scripts'), { recursive: true })
+    await mkdir(path.join(pluginDir, 'data'), { recursive: true })
+    await writeFile(path.join(pluginDir, 'data/value.txt'), 'bundled resource')
+    await symlink('value.txt', path.join(pluginDir, 'data/alias.txt'))
+    await writeFile(path.join(pluginDir, 'scripts/server.cjs'), "process.stdout.write(require('node:fs').readFileSync(process.env.ASSET, 'utf8'))")
+    await writeFile(path.join(pluginDir, 'mcp.json'), JSON.stringify({
+      $schema: PLUGIN_MCP_SCHEMA,
+      mcpServers: { server: {
+        type: 'stdio', command: 'node',
+        args: ['${PLUGIN_ROOT}/scripts/server.cjs'], cwd: '${PLUGIN_ROOT}',
+        env: { ASSET: '${PLUGIN_ROOT}/data/alias.txt' }
+      } }
+    }))
+    const target = await makeProject()
+    await importPlugin({ projectRoot: target, pluginDir })
+    await rm(source, { recursive: true, force: true })
+    const relocated = target + '-relocated'
+    await rename(target, relocated)
+    tempDirs.push(relocated)
+    const config = await loadAgentsConfig(relocated)
+    const server = config.mcp.servers['runtime.server']!
+    const resolve = (value: string): string => value.replaceAll('${PROJECT_ROOT}', relocated)
+    expect(server.args?.[0]).toMatch(/^\$\{PROJECT_ROOT\}\/\.agents\/plugins\//)
+    expect(JSON.stringify(server)).not.toContain(source)
+    const result = spawnSync(server.command!, server.args?.map(resolve), {
+      cwd: resolve(server.cwd!), env: { ...process.env, ASSET: resolve(server.env!.ASSET!) }, encoding: 'utf8'
+    })
+    expect(result.status).toBe(0)
+    expect(result.stdout).toBe('bundled resource')
+  })
+
+  it('rejects plugin assets linked outside the bundle before saving server definitions', async () => {
+    const source = await makeProject()
+    const pluginDir = path.join(source, 'dist/plugin')
+    await exportPlugin({ projectRoot: source, outDir: pluginDir, name: 'escaping' })
+    await writeFile(path.join(source, 'outside.txt'), 'private data')
+    await symlink(path.join(source, 'outside.txt'), path.join(pluginDir, 'external.txt'))
+    const target = await makeProject()
+    const before = await readFile(path.join(target, '.agents/agents.json'), 'utf8')
+    await expect(importPlugin({ projectRoot: target, pluginDir })).rejects.toThrow(/outside.*plugin|plugin.*outside/i)
+    expect(await readFile(path.join(target, '.agents/agents.json'), 'utf8')).toBe(before)
+  })
+
   it('refuses to import a package that fails validation', async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), 'agents-plugin-broken-'))
     tempDirs.push(dir)
@@ -278,6 +383,25 @@ describe('plugin name derivation', () => {
 })
 
 describe('plugin export safety', () => {
+  it.each(['.agents', '.agents/skills', '.agents/skills/nested/export'])('refuses overlapping export to %s without changing sources', async relative => {
+    const projectRoot = await makeProject()
+    const source = path.join(projectRoot, '.agents/skills/docs-research/SKILL.md')
+    const before = await readFile(source, 'utf8')
+    const outDir = path.join(projectRoot, relative)
+    await expect(exportPlugin({ projectRoot, outDir, name: 'team-stack' })).rejects.toThrow(/overlap/)
+    expect(await readFile(source, 'utf8')).toBe(before)
+    expect(await pathExists(path.join(outDir, 'plugin.json'))).toBe(false)
+  })
+
+  it('resolves symlinked parents before validating a not-yet-existing output', async () => {
+    const projectRoot = await makeProject()
+    const alias = path.join(projectRoot, 'alias')
+    await symlink(path.join(projectRoot, '.agents'), alias, 'dir')
+    const outDir = path.join(alias, 'skills/new/export')
+    await expect(exportPlugin({ projectRoot, outDir, name: 'team-stack' })).rejects.toThrow(/overlap/)
+    expect(await pathExists(path.join(outDir, 'plugin.json'))).toBe(false)
+  })
+
   it('refuses to export a literal credential from the committed config', async () => {
     const projectRoot = await makeProject()
     const config = await loadAgentsConfig(projectRoot)
@@ -326,7 +450,7 @@ describe('plugin export safety', () => {
       }
     })
 
-    expect(file.mcpServers.local?.command).toBe('${PLUGIN_ROOT}/bin/server')
+    expect(file.mcpServers.local?.command).toBe('./bin/server')
     expect(requiredEnv).toContain('WORKSPACE_DIR')
   })
 
@@ -368,6 +492,22 @@ describe('plugin export safety', () => {
 })
 
 describe('plugin secret handling', () => {
+  it.each(['fixture-token', '${TOKEN:-fixture-token}', '${TOKEN}extra'])('refuses a literal credential in token args: %s', async value => {
+    const projectRoot = await makeProject()
+    const config = await loadAgentsConfig(projectRoot)
+    config.mcp.servers = { svc: { transport: 'stdio', command: 'node', args: ['server.js', '--token', value] } }
+    await saveAgentsConfig(projectRoot, config)
+    const outDir = path.join(projectRoot, 'bundle')
+    await expect(exportPlugin({ projectRoot, outDir, name: 'test' })).rejects.toThrow(/literal values/)
+    expect(await pathExists(outDir)).toBe(false)
+    await expect(exportPlugin({ projectRoot, outDir, name: 'test', allowLiteralSecrets: true })).resolves.toBeDefined()
+  })
+
+  it('allows placeholder token arguments but rejects inline literal token flags', () => {
+    expect(buildPluginMcp({ svc: { transport: 'stdio', command: 'node', args: ['--token', '${TOKEN}'] } }).literalSecrets).toEqual([])
+    expect(buildPluginMcp({ svc: { transport: 'stdio', command: 'node', args: ['--token=fixture-token'] } }).literalSecrets).toEqual(['svc.args.0'])
+  })
+
   it('refuses a placeholder whose fallback is a literal credential', () => {
     const { literalSecrets } = buildPluginMcp({
       api: {
@@ -423,7 +563,7 @@ describe('plugin secret handling', () => {
     expect(result.errors.join(' ')).toContain('not a string')
   })
 
-  it('restores ${PROJECT_ROOT} in url and headers on import', async () => {
+  it('uses a portable installed plugin root in headers on import', async () => {
     const source = await makeProject()
     const config = await loadAgentsConfig(source)
     config.mcp.servers = {
@@ -444,6 +584,6 @@ describe('plugin secret handling', () => {
     await importPlugin({ projectRoot: target, pluginDir: outDir })
 
     const imported = await loadAgentsConfig(target)
-    expect(imported.mcp.servers['team-stack.api']?.headers?.['X-Workspace']).toBe('${PROJECT_ROOT}')
+    expect(imported.mcp.servers['team-stack.api']?.headers?.['X-Workspace']).toMatch(/^\$\{PROJECT_ROOT\}\/\.agents\/plugins\/team-stack-/)
   })
 })

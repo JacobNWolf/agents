@@ -56,7 +56,8 @@ async function main(): Promise<void> {
     .version(CLI_VERSION)
     .option('--no-update-check', 'Disable update availability checks')
 
-  program.hook('preAction', async (_thisCommand, actionCommand) => {
+  // Optional metadata writes must not compete with the command's config lock.
+  program.hook('postAction', async (_thisCommand, actionCommand) => {
     const opts = actionCommand.optsWithGlobals() as { updateCheck?: boolean; path?: string; global?: boolean }
     if (opts.updateCheck === false) return
     if (process.argv.includes('--no-update-check')) return

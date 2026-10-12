@@ -52,6 +52,27 @@ afterEach(async () => {
 })
 
 describe('shared project .mcp.json', () => {
+  it('records newly applied ownership even when cleanup of the previous path fails', async () => {
+    const projectRoot = await setupProject(['copilot_cli'])
+    const paths = getProjectPaths(projectRoot)
+    await performSync({ projectRoot, check: false, verbose: false })
+    const previous = await readFile(paths.copilotCliMcp, 'utf8')
+    const config = await loadAgentsConfig(projectRoot)
+    config.integrations.options.copilotCliPath = '.github/mcp.json'
+    await saveAgentsConfig(projectRoot, config)
+    await writeFile(paths.copilotCliMcp, '{ broken')
+    await expect(performSync({ projectRoot, check: false, verbose: false })).rejects.toThrow(/Sync incomplete/)
+    const state = JSON.parse(await readFile(paths.generatedProjectMcpState, 'utf8'))
+    expect(state.files['.github/mcp.json'].sort()).toEqual(['api', 'docs'])
+    expect(state.files['.mcp.json'].sort()).toEqual(['api', 'docs'])
+    await writeFile(paths.copilotCliMcp, previous)
+    config.mcp.servers = {}
+    await saveAgentsConfig(projectRoot, config)
+    await performSync({ projectRoot, check: false, verbose: false })
+    expect(await pathExists(paths.copilotCliMcp)).toBe(false)
+    expect(await pathExists(paths.copilotCliGithubMcp)).toBe(false)
+  })
+
   it('writes Claude Code servers to .mcp.json on project scope', async () => {
     const projectRoot = await setupProject(['claude'])
     const paths = getProjectPaths(projectRoot)

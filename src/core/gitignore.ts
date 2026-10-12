@@ -4,7 +4,7 @@ import type { SyncMode } from '../types.js'
 import { pathExists, removeIfExists, writeTextAtomic } from './fs.js'
 import { SKILL_BRIDGE_GITIGNORE_ENTRIES } from './skills.js'
 
-const BASE_MANAGED_ENTRIES = ['.agents/local.json', '.agents/generated/', '.agents/agents.json.*.bak']
+const BASE_MANAGED_ENTRIES = ['.agents/local.json', '.agents/generated/', '.agents/agents.json.*.bak', '.agents/plugin-data/']
 const SOURCE_ONLY_ENTRIES = [
   'CLAUDE.md',
   '.agents/mcp_config.json',

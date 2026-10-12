@@ -3,7 +3,7 @@ import type { McpServerDefinition, McpTransportType } from '../types.js'
 import { loadAgentsConfig } from '../core/config.js'
 import { CancelledError } from '../core/errors.js'
 import { upsertMcpServers } from '../core/mcpCrud.js'
-import { inferSecretArgs, splitServerSecrets } from '../core/mcpSecrets.js'
+import { inferSecretArgs, inferSecretKeyValues, splitServerSecrets } from '../core/mcpSecrets.js'
 import { runMcpImport } from './mcp-import.js'
 import {
   parseKeyValue,
@@ -183,8 +183,8 @@ export async function runMcpAdd(options: McpAddOptions): Promise<void> {
   const split = splitServerSecrets({
     name,
     server: baseServer,
-    secretEnv: explicitSecretEnv,
-    secretHeaders: explicitSecretHeaders,
+    secretEnv: { ...inferSecretKeyValues(baseServer.env), ...explicitSecretEnv },
+    secretHeaders: { ...inferSecretKeyValues(baseServer.headers), ...explicitSecretHeaders },
     secretArgs: mergedSecretArgs
   })
 

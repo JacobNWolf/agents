@@ -1,4 +1,5 @@
 import path from 'node:path'
+import { isDeepStrictEqual } from 'node:util'
 import { ensureDir, pathExists, readJson, readTextOrEmpty, removeIfExists, writeJsonAtomic } from '../core/fs.js'
 import { toChangedEntry, writeManagedFile } from '../core/managedFiles.js'
 import { mergeCodexConfig, removeCodexManagedBlock } from '../core/codexConfig.js'
@@ -43,6 +44,7 @@ interface HookContext {
   config: AgentsConfig
   generatedByIntegration: Partial<Record<IntegrationName, string>>
   enabled: boolean
+  previousGeneratedByIntegration?: Partial<Record<IntegrationName, string>>
 }
 
 export interface IntegrationSyncHook {
@@ -85,48 +87,21 @@ export const INTEGRATION_SYNC_HOOKS: IntegrationSyncHook[] = [
         warnings: gemini.warnings
       }
     },
+    materializeWhenDisabled: true,
     materialize: async (context) => {
-      const targetPath = context.paths.geminiSettings
-      const rawGenerated = context.generatedByIntegration.gemini ?? ''
-      let generated: Record<string, unknown> = {}
-      if (rawGenerated.trim()) {
-        generated = parseJsonObject(rawGenerated, 'generated Gemini config')
-      }
-
-      let existing: Record<string, unknown> = {}
-      if (await pathExists(targetPath)) {
-        try {
-          const parsed = await readJson<unknown>(targetPath)
-          if (!isRecord(parsed)) {
-            context.warnings.push(`Existing Gemini config at ${targetPath} is not a JSON object; skipped Gemini sync.`)
-            return
-          }
-          existing = parsed
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error)
-          context.warnings.push(`Failed to read existing Gemini config at ${targetPath}; skipped Gemini sync. ${message}`)
-          return
-        }
-      }
-
-      const merged: Record<string, unknown> = {
-        ...existing,
-        context: {
-          ...(typeof existing.context === 'object' && existing.context !== null
-            ? (existing.context as Record<string, unknown>)
-            : {}),
-          fileName: 'AGENTS.md'
-        },
-        contextFileName: generated.contextFileName,
-        mcpServers: generated.mcpServers
-      }
-
-      await writeManagedFile({
-        absolutePath: targetPath,
-        content: `${JSON.stringify(merged, null, 2)}\n`,
-        projectRoot: path.dirname(path.dirname(targetPath)),
-        check: context.check,
-        changed: context.changed
+      await mergeJsonKey({
+        context,
+        targetPath: context.paths.geminiSettings,
+        rawGenerated: context.generatedByIntegration.gemini ?? '',
+        previousGenerated: context.previousGeneratedByIntegration?.gemini,
+        key: 'mcpServers',
+        label: 'Gemini',
+        statePath: context.paths.generatedGeminiState,
+        transform: (merged) => context.enabled ? {
+          ...merged,
+          context: { ...recordFrom(merged.context), fileName: 'AGENTS.md' },
+          contextFileName: 'AGENTS.md'
+        } : merged
       })
     }
   },
@@ -140,15 +115,17 @@ export const INTEGRATION_SYNC_HOOKS: IntegrationSyncHook[] = [
         warnings: copilot.warnings
       }
     },
+    materializeWhenDisabled: true,
     materialize: async (context) => {
-      const targetPath = context.paths.vscodeMcp
-      const content = context.generatedByIntegration.copilot_vscode ?? ''
-      await writeManagedFile({
-        absolutePath: targetPath,
-        content,
-        projectRoot: path.dirname(path.dirname(targetPath)),
-        check: context.check,
-        changed: context.changed
+      await mergeJsonKey({
+        context,
+        targetPath: context.paths.vscodeMcp,
+        rawGenerated: context.generatedByIntegration.copilot_vscode ?? '',
+        previousGenerated: context.previousGeneratedByIntegration?.copilot_vscode,
+        key: 'servers',
+        label: 'Copilot VS Code',
+        statePath: context.paths.generatedCopilotState,
+        removeEmptyFile: true
       })
     }
   },
@@ -175,15 +152,17 @@ export const INTEGRATION_SYNC_HOOKS: IntegrationSyncHook[] = [
         warnings: cursor.warnings
       }
     },
+    materializeWhenDisabled: true,
     materialize: async (context) => {
-      const targetPath = context.paths.cursorMcp
-      const content = context.generatedByIntegration.cursor ?? ''
-      await writeManagedFile({
-        absolutePath: targetPath,
-        content,
-        projectRoot: path.dirname(path.dirname(targetPath)),
-        check: context.check,
-        changed: context.changed
+      await mergeJsonKey({
+        context,
+        targetPath: context.paths.cursorMcp,
+        rawGenerated: context.generatedByIntegration.cursor ?? '',
+        previousGenerated: context.previousGeneratedByIntegration?.cursor,
+        key: 'mcpServers',
+        label: 'Cursor',
+        statePath: context.paths.generatedCursorMcpState,
+        removeEmptyFile: true
       })
     }
   },
@@ -209,15 +188,24 @@ export const INTEGRATION_SYNC_HOOKS: IntegrationSyncHook[] = [
         context.warnings.push('Found legacy .antigravity/mcp.json. Antigravity now uses .agents/mcp_config.json for workspace MCP.')
       }
 
-      const previousManagedNames = await readManagedGlobalNames(context.paths.generatedAntigravityState)
-      await cleanupLegacyAntigravityGlobal({
-        globalPath: legacyGlobalPath,
-        previousManagedNames,
-        projectRoot: context.projectRoot,
-        check: context.check,
-        changed: context.changed,
-        warnings: context.warnings
-      })
+      const statePath = context.paths.generatedAntigravityState
+      const previousManagedNames = [...new Set([
+        ...await readManagedGlobalNames(statePath),
+        ...await readManagedGlobalNames(statePath, 'pendingLegacyNames')
+      ])]
+      let legacyError: unknown
+      try {
+        await cleanupLegacyAntigravityGlobal({
+          globalPath: legacyGlobalPath,
+          previousManagedNames,
+          projectRoot: context.projectRoot,
+          check: context.check,
+          changed: context.changed,
+          warnings: context.warnings
+        })
+      } catch (error) {
+        legacyError = error
+      }
 
       await syncManagedAntigravityWorkspace({
         enabled: context.enabled && mcpSyncEnabled,
@@ -229,6 +217,13 @@ export const INTEGRATION_SYNC_HOOKS: IntegrationSyncHook[] = [
         changed: context.changed,
         warnings: context.warnings
       })
+      if (!context.check) {
+        await writeJsonAtomic(statePath, {
+          managedNames: await readManagedGlobalNames(statePath),
+          ...(legacyError ? { pendingLegacyNames: previousManagedNames } : {})
+        })
+      }
+      if (legacyError) throw legacyError
     }
   },
   {
@@ -268,61 +263,28 @@ export const INTEGRATION_SYNC_HOOKS: IntegrationSyncHook[] = [
         warnings: opencode.warnings
       }
     },
+    materializeWhenDisabled: true,
     materialize: async (context) => {
       const targetPath = context.paths.opencodeConfig
-      const rawGenerated = context.generatedByIntegration.opencode ?? ''
-
-      let generated: Record<string, unknown> = {}
-      if (rawGenerated.trim()) {
-        generated = parseJsonObject(rawGenerated, 'generated OpenCode config')
-      }
-
-      let existing: Record<string, unknown> = {}
       let sourcePath = targetPath
-      let migratedFromLegacy = false
       if (!(await pathExists(targetPath)) && context.paths.isHome) {
         const legacyPath = path.join(context.projectRoot, 'opencode.json')
-        if (await pathExists(legacyPath)) {
-          sourcePath = legacyPath
-          migratedFromLegacy = true
-        }
+        if (await pathExists(legacyPath)) sourcePath = legacyPath
       }
-
-      if (await pathExists(sourcePath)) {
-        try {
-          const parsed = await readJson<unknown>(sourcePath)
-          if (!isRecord(parsed)) {
-            context.warnings.push(`Existing OpenCode config at ${sourcePath} is not a JSON object; skipped OpenCode sync.`)
-            return
-          }
-          existing = parsed
-          if (migratedFromLegacy) {
-            context.warnings.push('Migrated existing OpenCode settings from legacy ~/opencode.json to ~/.config/opencode/opencode.json.')
-          }
-        } catch (error) {
-          context.warnings.push(
-            `Failed to read existing OpenCode config at ${sourcePath}; skipped OpenCode sync. ${error instanceof Error ? error.message : String(error)}`,
-          )
-          return
-        }
+      await mergeJsonKey({
+        context,
+        targetPath,
+        sourcePath,
+        rawGenerated: context.generatedByIntegration.opencode ?? '',
+        previousGenerated: context.previousGeneratedByIntegration?.opencode,
+        key: 'mcp',
+        label: 'OpenCode',
+        statePath: context.paths.generatedOpencodeState,
+        transform: normalizeOpencodeConfig
+      })
+      if (sourcePath !== targetPath) {
+        context.warnings.push('Migrated existing OpenCode settings from legacy ~/opencode.json to ~/.config/opencode/opencode.json.')
       }
-
-      const generatedMcp = typeof generated.mcp === 'object' && generated.mcp !== null && !Array.isArray(generated.mcp)
-        ? generated.mcp as Record<string, unknown>
-        : {}
-
-      const merged = normalizeOpencodeConfig({
-        ...existing,
-        mcp: generatedMcp
-      })
-
-      await writeManagedFile({
-        absolutePath: targetPath,
-        content: `${JSON.stringify(merged, null, 2)}\n`,
-        projectRoot: context.projectRoot,
-        check: context.check,
-        changed: context.changed
-      })
     }
   },
   {
@@ -335,16 +297,17 @@ export const INTEGRATION_SYNC_HOOKS: IntegrationSyncHook[] = [
         warnings: junie.warnings
       }
     },
+    materializeWhenDisabled: true,
     materialize: async (context) => {
-      if (!context.check) {
-        await ensureDir(context.paths.junieMcpDir)
-      }
-      await writeManagedFile({
-        absolutePath: context.paths.junieMcp,
-        content: context.generatedByIntegration.junie ?? '{}',
-        projectRoot: context.projectRoot,
-        check: context.check,
-        changed: context.changed
+      await mergeJsonKey({
+        context,
+        targetPath: context.paths.junieMcp,
+        rawGenerated: context.generatedByIntegration.junie ?? '',
+        previousGenerated: context.previousGeneratedByIntegration?.junie,
+        key: 'mcpServers',
+        label: 'Junie',
+        statePath: context.paths.generatedJunieState,
+        removeEmptyFile: true
       })
     }
   },
@@ -556,10 +519,8 @@ async function syncManagedAntigravityWorkspace(args: {
       try {
         existing = normalizeAntigravityMcpPayload(await readAntigravityMcp(args.workspacePath) ?? {})
       } catch (error) {
-        args.warnings.push(
-          `Failed to read existing Antigravity MCP at ${args.workspacePath}; skipped Antigravity workspace sync. ${error instanceof Error ? error.message : String(error)}`,
-        )
-        return
+        throw new Error(
+          `Failed to read existing Antigravity MCP at ${args.workspacePath}; skipped Antigravity workspace sync. ${error instanceof Error ? error.message : String(error)}`)
       }
     }
 
@@ -624,10 +585,8 @@ async function cleanupLegacyAntigravityGlobal(args: {
     try {
       existing = normalizeAntigravityMcpPayload(await readAntigravityMcp(args.globalPath) ?? {})
     } catch (error) {
-      args.warnings.push(
-        `Failed to read legacy Antigravity MCP at ${args.globalPath}; skipped legacy cleanup. ${error instanceof Error ? error.message : String(error)}`,
-      )
-      return
+      throw new Error(
+        `Failed to read legacy Antigravity MCP at ${args.globalPath}; skipped legacy cleanup. ${error instanceof Error ? error.message : String(error)}`)
     }
 
     const existingServers = recordFrom(existing.mcpServers)
@@ -684,10 +643,8 @@ async function syncManagedWindsurfGlobal(args: {
       try {
         existing = normalizeWindsurfMcpPayload(await readWindsurfMcp(args.globalPath) ?? {})
       } catch (error) {
-        args.warnings.push(
-          `Failed to read existing Windsurf MCP at ${args.globalPath}; skipped Windsurf global sync. ${error instanceof Error ? error.message : String(error)}`,
-        )
-        return
+        throw new Error(
+          `Failed to read existing Windsurf MCP at ${args.globalPath}; skipped Windsurf global sync. ${error instanceof Error ? error.message : String(error)}`)
       }
     }
 
@@ -733,12 +690,12 @@ async function syncManagedWindsurfGlobal(args: {
   }
 }
 
-async function readManagedGlobalNames(statePath: string): Promise<string[]> {
+async function readManagedGlobalNames(statePath: string, key: 'managedNames' | 'pendingLegacyNames' = 'managedNames'): Promise<string[]> {
   if (!(await pathExists(statePath))) return []
   try {
-    const parsed = await readJson<ManagedGlobalState>(statePath)
-    return Array.isArray(parsed.managedNames)
-      ? parsed.managedNames.filter((name): name is string => typeof name === 'string')
+    const parsed = await readJson<ManagedGlobalState & { pendingLegacyNames?: string[] }>(statePath)
+    return Array.isArray(parsed[key])
+      ? parsed[key].filter((name): name is string => typeof name === 'string')
       : []
   } catch {
     return []
@@ -819,8 +776,7 @@ async function materializeTomlConfig(args: {
       cleaned = removeCodexManagedBlock(existingText)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      context.warnings.push(`Failed to clean ${label} config at ${targetPath}; left unchanged. ${message}`)
-      return
+      throw new Error(`Failed to clean ${label} config at ${targetPath}; left unchanged. ${message}`)
     }
 
     if (cleaned === existingText) return
@@ -846,8 +802,7 @@ async function materializeTomlConfig(args: {
     content = mergeCodexConfig(existingText, generatedContent)
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    context.warnings.push(`Failed to merge ${label} config at ${targetPath}; skipped ${label} sync. ${message}`)
-    return
+    throw new Error(`Failed to merge ${label} config at ${targetPath}; skipped ${label} sync. ${message}`)
   }
 
   await writeManagedFile({
@@ -875,11 +830,15 @@ async function mergeManagedKey(args: {
   statePath: string
   jsonc: boolean
   removeEmptyFile?: boolean
+  previousGenerated?: string
+  sourcePath?: string
+  transform?: (config: Record<string, unknown>) => Record<string, unknown>
 }): Promise<void> {
   const { context, targetPath, rawGenerated, key, label, statePath, jsonc, removeEmptyFile } = args
 
-  const previousNames = await readManagedGlobalNames(statePath)
-  if (!context.enabled && previousNames.length === 0) return
+  const hasState = await pathExists(statePath)
+  let previousNames = await readManagedGlobalNames(statePath)
+  if (!context.enabled && previousNames.length === 0 && (hasState || !args.previousGenerated)) return
 
   let generated: Record<string, unknown> = {}
   if (context.enabled && rawGenerated.trim()) {
@@ -887,40 +846,49 @@ async function mergeManagedKey(args: {
   }
   const managed = recordFrom(generated[key])
 
-  const existingText = await readTextOrEmpty(targetPath)
+  const existingText = await readTextOrEmpty(args.sourcePath ?? targetPath)
   let existing: Record<string, unknown> = {}
   if (existingText.trim().length > 0) {
     if (jsonc) {
       const errors: { error: number; offset: number; length: number }[] = []
       const parsed = parseJsonc(existingText, errors, { allowTrailingComma: true }) as unknown
       if (errors.length > 0 || (parsed !== undefined && !isRecord(parsed))) {
-        context.warnings.push(`Existing ${label} config at ${targetPath} is not valid JSONC; skipped ${label} sync.`)
-        return
+        throw new Error(`Existing ${label} config at ${targetPath} is not valid JSONC; skipped ${label} sync.`)
       }
       existing = isRecord(parsed) ? parsed : {}
     } else {
       try {
         const parsed = JSON.parse(existingText) as unknown
         if (!isRecord(parsed)) {
-          context.warnings.push(`Existing ${label} config at ${targetPath} is not a JSON object; skipped ${label} sync.`)
-          return
+          throw new Error(`Existing ${label} config at ${targetPath} is not a JSON object; skipped ${label} sync.`)
         }
         existing = parsed
       } catch (error) {
+        // A preview alone does not establish ownership of a disabled tool's file.
+        if (!context.enabled && previousNames.length === 0) return
         const message = error instanceof Error ? error.message : String(error)
-        context.warnings.push(`Failed to read existing ${label} config at ${targetPath}; skipped ${label} sync. ${message}`)
-        return
+        throw new Error(`Failed to read existing ${label} config at ${targetPath}; skipped ${label} sync. ${message}`)
       }
     }
   }
 
-  const nextEntries = { ...recordFrom(existing[key]) }
-  for (const name of previousNames) {
-    delete nextEntries[name]
+  // Older releases recorded only the preview. Adopt matching entries without
+  // claiming unrelated manual servers when introducing the ownership state.
+  if (!hasState && args.previousGenerated?.trim()) {
+    try {
+      const previous = recordFrom(parseJsonObject(args.previousGenerated, 'previous generated config')[key])
+      const current = recordFrom(existing[key])
+      previousNames = Object.keys(previous).filter(name =>
+        isDeepStrictEqual(current[name], previous[name]))
+    } catch {
+      // An unreadable preview is not evidence of ownership.
+    }
   }
-  for (const [name, value] of Object.entries(managed)) {
-    nextEntries[name] = value
-  }
+  if (!context.enabled && previousNames.length === 0) return
+
+  const takenOver: string[] = []
+  const nextEntries = mergeManagedServers(recordFrom(existing[key]), previousNames, managed, takenOver)
+  context.warnings.push(...formatTakenOverWarnings(label, takenOver))
 
   const otherKeys = Object.keys(existing).filter((item) => item !== key)
   // A JSONC file can hold comments that never appear in the parsed object, so an
@@ -942,7 +910,8 @@ async function mergeManagedKey(args: {
     const applied = applyEdits(base, edits)
     content = applied.endsWith('\n') ? applied : `${applied}\n`
   } else {
-    content = `${JSON.stringify({ ...existing, [key]: nextEntries }, null, 2)}\n`
+    const merged = { ...existing, [key]: nextEntries }
+    content = `${JSON.stringify(args.transform ? args.transform(merged) : merged, null, 2)}\n`
   }
 
   await writeManagedFile({
@@ -967,6 +936,9 @@ async function mergeJsonKey(args: {
   label: string
   statePath: string
   removeEmptyFile?: boolean
+  previousGenerated?: string
+  sourcePath?: string
+  transform?: (config: Record<string, unknown>) => Record<string, unknown>
 }): Promise<void> {
   await mergeManagedKey({ ...args, jsonc: false })
 }
@@ -1009,8 +981,7 @@ async function syncManagedGooseGlobal(context: HookContext): Promise<void> {
       doc = await readGooseDocument(configPath)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      context.warnings.push(`Failed to read existing Goose config at ${configPath}; skipped Goose sync. ${message}`)
-      return
+      throw new Error(`Failed to read existing Goose config at ${configPath}; skipped Goose sync. ${message}`)
     }
 
     const rawGenerated = context.generatedByIntegration.goose ?? ''

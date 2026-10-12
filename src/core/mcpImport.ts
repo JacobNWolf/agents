@@ -28,7 +28,9 @@ const SERVER_FIELD_HINTS = new Set([
   'targets',
   'enabled',
   'description',
-  'label'
+  'label',
+  'timeout', 'connectTimeout', 'tools', 'disabledTools', 'oauth',
+  'headersHelper', 'bearerTokenEnvVar', 'envFile'
 ])
 
 export async function readImportInput(args: {
@@ -181,6 +183,33 @@ function normalizeServerDefinition(value: unknown, serverName: string): McpServe
     (key) => validateHeaderKey(key, 'header'),
   )
   if (Object.keys(headers).length > 0) out.headers = headers
+
+  for (const key of ['timeout', 'connectTimeout'] as const) {
+    if (value[key] === undefined || value[key] === null) continue
+    if (typeof value[key] !== 'number' || !Number.isFinite(value[key]) || value[key] < 0) {
+      throw new Error(`Field "${serverName}.${key}" must be a nonnegative finite number.`)
+    }
+    out[key] = value[key]
+  }
+  for (const key of ['tools', 'disabledTools'] as const) {
+    const items = readStringArray(value[key], `${serverName}.${key}`)
+    if (items !== undefined) out[key] = items
+  }
+  for (const key of ['headersHelper', 'bearerTokenEnvVar', 'envFile'] as const) {
+    const text = readOptionalString(value[key], `${serverName}.${key}`)
+    if (text !== undefined) {
+      if (key === 'bearerTokenEnvVar') validateEnvKey(text, 'bearer token environment variable')
+      out[key] = text
+    }
+  }
+  if (value.oauth !== undefined && value.oauth !== null) {
+    if (!isObject(value.oauth)) throw new Error(`Field "${serverName}.oauth" must be an object.`)
+    out.oauth = {}
+    for (const key of ['scopes', 'clientId', 'clientSecret', 'authServerMetadataUrl'] as const) {
+      const text = readOptionalString(value.oauth[key], `${serverName}.oauth.${key}`)
+      if (text !== undefined) out.oauth[key] = text
+    }
+  }
 
   return out
 }

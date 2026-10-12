@@ -12,7 +12,7 @@ import { pathExists, readJson, readTextOrEmpty } from '../core/fs.js'
 import { loadResolvedRegistry } from '../core/mcp.js'
 import { getProjectPaths, toHomeRelativePath } from '../core/paths.js'
 import type { ProjectPaths } from '../core/paths.js'
-import type { CopilotCliPath } from '../types.js'
+import type { ClaudeScope, CopilotCliPath } from '../types.js'
 import { getWindsurfGlobalMcpPath } from '../core/windsurf.js'
 import { commandExists, runCommand } from '../core/shell.js'
 import { performSync } from '../core/sync.js'
@@ -104,9 +104,13 @@ export async function runDoctor(options: DoctorOptions): Promise<void> {
   const enabledForMaterialization = antigravityMcpSyncEnabled
     ? config.integrations.enabled
     : config.integrations.enabled.filter((integration) => integration !== 'antigravity')
+  const integrationsWithServers = new Set<IntegrationName>()
 
   try {
     const resolved = await loadResolvedRegistry(options.projectRoot)
+    for (const id of enabledForMaterialization) {
+      if (resolved.serversByTarget[id].length > 0) integrationsWithServers.add(id)
+    }
     for (const missing of resolved.missingRequiredEnv) {
       issues.push({ level: 'warning', message: `Missing required env: ${missing}` })
     }
@@ -147,14 +151,20 @@ export async function runDoctor(options: DoctorOptions): Promise<void> {
     })
   }
 
-  await validateManagedConfigSyntax(
-    paths,
-    enabledForMaterialization,
-    claudeDesktopConfigPath,
-    windsurfGlobalMcpPath,
-    issues,
-    { copilotCliPath: config.integrations.options.copilotCliPath },
-  )
+  const inspectManagedSyntax = async (): Promise<Issue[]> => {
+    const syntaxIssues: Issue[] = []
+    await validateManagedConfigSyntax(
+      paths, enabledForMaterialization, claudeDesktopConfigPath, windsurfGlobalMcpPath,
+      syntaxIssues, {
+        copilotCliPath: config.integrations.options.copilotCliPath,
+        claudeScope: config.integrations.options.claudeScope,
+        requiredIntegrations: integrationsWithServers
+      },
+    )
+    return syntaxIssues
+  }
+  const initialSyntaxIssues = await inspectManagedSyntax()
+  issues.push(...initialSyntaxIssues)
 
   const skillWarnings = await validateSkillsDirectory(paths.agentsSkillsDir)
   for (const warning of skillWarnings) {
@@ -346,6 +356,12 @@ export async function runDoctor(options: DoctorOptions): Promise<void> {
       for (const warning of syncResult.warnings) {
         issues.push({ level: 'warning', message: warning })
       }
+      // Report the state after repair while retaining unrelated source errors.
+      const repaired = new Set(initialSyntaxIssues)
+      for (let index = issues.length - 1; index >= 0; index -= 1) {
+        if (repaired.has(issues[index])) issues.splice(index, 1)
+      }
+      issues.push(...await inspectManagedSyntax())
       fixSpin.stop('Fixes applied')
     } catch (error) {
       fixSpin.stop('Fixes failed')
@@ -682,7 +698,7 @@ async function validateManagedConfigSyntax(
   claudeDesktopConfigPath: string | undefined,
   windsurfGlobalMcpPath: string,
   issues: Issue[],
-  options: { copilotCliPath: CopilotCliPath },
+  options: { copilotCliPath: CopilotCliPath; claudeScope: ClaudeScope; requiredIntegrations: Set<IntegrationName> },
 ): Promise<void> {
   // The generated previews come from the sync hooks, so a new integration brings its
   // preview into the check with it. The parser follows the file extension.
@@ -701,27 +717,29 @@ async function validateManagedConfigSyntax(
   // Every integration whose configuration is one known file is validated from the
   // registry, so a tool added to the registry cannot be forgotten here.
   for (const managed of listManagedConfigs(paths, enabledIntegrations)) {
-    await validateManagedConfigFile(managed.filePath, managed.label, managed.descriptor.format, issues)
+    await validateManagedConfigFile(managed.filePath, managed.label, managed.descriptor.format, issues,
+      options.requiredIntegrations.has(managed.id))
   }
 
   if (enabledIntegrations.includes('copilot_cli')) {
     const copilotCliMcpPath = options.copilotCliPath === '.github/mcp.json'
       ? paths.copilotCliGithubMcp
       : paths.copilotCliMcp
-    await validateJsonIfExists(copilotCliMcpPath, options.copilotCliPath, issues)
+    await validateManagedConfigFile(copilotCliMcpPath, options.copilotCliPath, 'json', issues,
+      options.requiredIntegrations.has('copilot_cli'))
   }
   if (enabledIntegrations.includes('claude_desktop') && claudeDesktopConfigPath) {
-    await validateJsonIfExists(
+    await validateManagedConfigFile(
       claudeDesktopConfigPath,
       `Claude Desktop config (${claudeDesktopConfigPath})`,
-      issues,
+      'json', issues, options.requiredIntegrations.has('claude_desktop'),
     )
   }
   if (enabledIntegrations.includes('windsurf')) {
-    await validateJsonIfExists(
+    await validateManagedConfigFile(
       windsurfGlobalMcpPath,
       `Windsurf global MCP (${windsurfGlobalMcpPath})`,
-      issues,
+      'json', issues, options.requiredIntegrations.has('windsurf'),
     )
   }
   // Claude Code on project scope writes .mcp.json too, so the file has to be checked
@@ -731,7 +749,8 @@ async function validateManagedConfigSyntax(
   const copilotCliCoversProjectMcp = enabledIntegrations.includes('copilot_cli')
     && options.copilotCliPath === '.mcp.json'
   if (enabledIntegrations.includes('claude') && !copilotCliCoversProjectMcp) {
-    await validateJsonIfExists(paths.copilotCliMcp, '.mcp.json', issues)
+    await validateManagedConfigFile(paths.copilotCliMcp, '.mcp.json', 'json', issues,
+      options.claudeScope === 'project' && options.requiredIntegrations.has('claude'))
   }
 }
 
@@ -753,7 +772,12 @@ async function validateManagedConfigFile(
   label: string,
   format: ManagedConfigFormat,
   issues: Issue[],
+  required = false,
 ): Promise<void> {
+  if (required && !(await pathExists(filePath))) {
+    issues.push({ level: 'error', message: `Missing ${label} for configured MCP servers (run agents sync).` })
+    return
+  }
   if (format === 'toml') return validateTomlIfExists(filePath, label, issues)
   if (format === 'jsonc') return validateJsoncIfExists(filePath, label, issues)
   if (format === 'yaml') return validateYamlIfExists(filePath, label, issues)

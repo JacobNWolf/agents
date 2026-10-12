@@ -3,6 +3,8 @@ import path from 'node:path'
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { checkForUpdates } from '../src/core/updateCheck.js'
+import { acquireSyncLock } from '../src/core/syncLock.js'
+import { getProjectPaths } from '../src/core/paths.js'
 
 const tempDirs: string[] = []
 const originalHome = process.env.HOME
@@ -20,6 +22,29 @@ afterEach(async () => {
 })
 
 describe('update checks', () => {
+  it('does not overwrite local data while a config mutation holds the lock', async () => {
+    const projectRoot = await mkdtemp(path.join(os.tmpdir(), 'agents-update-lock-'))
+    tempDirs.push(projectRoot)
+    const paths = getProjectPaths(projectRoot)
+    await mkdir(paths.agentsDir, { recursive: true })
+    const document = { mcpServers: { docs: { headers: { Authorization: 'Bearer fixture' } } } }
+    const before = JSON.stringify(document)
+    await writeFile(paths.agentsLocal, before)
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ version: '0.9.2' }))))
+    const release = await acquireSyncLock(paths.generatedSyncLock)
+    try {
+      const result = await checkForUpdates({ projectRoot, currentVersion: '0.9.2', forceRefresh: true })
+      expect(result.latestVersion).toBe('0.9.2')
+      expect(await readFile(paths.agentsLocal, 'utf8')).toBe(before)
+    } finally {
+      await release()
+    }
+    await checkForUpdates({ projectRoot, currentVersion: '0.9.2', forceRefresh: true })
+    const saved = JSON.parse(await readFile(paths.agentsLocal, 'utf8'))
+    expect(saved.mcpServers).toEqual(document.mcpServers)
+    expect(saved.meta.updateCheck.latestVersion).toBe('0.9.2')
+  })
+
   it('stores update metadata in project local.json when present', async () => {
     const projectRoot = await mkdtemp(path.join(os.tmpdir(), 'agents-update-check-'))
     tempDirs.push(projectRoot)

@@ -1,6 +1,7 @@
 import path from 'node:path'
+import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
-import { ensureDir, pathExists, readJson, writeJsonAtomic } from './fs.js'
+import { ensureDir, pathExists, readJson, readTextOrEmpty, writeJsonAtomic } from './fs.js'
 import { loadAgentsConfigDetailed, persistMigratedConfig, saveAgentsConfig } from './config.js'
 import { loadResolvedRegistry } from './mcp.js'
 import { writeManagedFile } from './managedFiles.js'
@@ -10,6 +11,7 @@ import { toManagedClaudeName } from '../integrations/claude.js'
 import { INTEGRATION_SYNC_HOOKS } from '../integrations/syncHooks.js'
 import { ensureProjectGitignore } from './gitignore.js'
 import { syncSkills } from './skills.js'
+import { syncPluginData } from './pluginRuntime.js'
 import { syncClaudeInstructions } from './claudeInstructions.js'
 import {
   getClaudeDesktopConfigPath,
@@ -40,6 +42,7 @@ import type { AgentsConfig, IntegrationName, ResolvedMcpServer, SyncOptions, Syn
 
 interface ClaudeState {
   managedNames: string[]
+  definitionHashes?: Record<string, string>
 }
 
 interface CursorState {
@@ -66,6 +69,14 @@ export async function performSync(options: SyncOptions): Promise<SyncResult> {
     const { config, migratedFrom } = await loadAgentsConfigDetailed(projectRoot)
     const sourceFingerprint = await computeSharedSourceFingerprint(projectRoot, config)
     const changed: string[] = []
+    const errors: string[] = []
+    const attempt = async (label: string, operation: () => Promise<void>): Promise<void> => {
+      try {
+        await operation()
+      } catch (error) {
+        errors.push(`${label}: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
 
     const migrationWarnings: string[] = []
     if (migratedFrom !== null) {
@@ -103,8 +114,11 @@ export async function performSync(options: SyncOptions): Promise<SyncResult> {
     }
 
     const enabled = new Set(config.integrations.enabled)
+    await attempt('Plugin data', () => syncPluginData(projectRoot,
+      config.integrations.enabled.flatMap(id => resolved.serversByTarget[id]), check, changed))
     warnings.push(...collectUnsupportedFieldWarnings(resolved.serversByTarget, config.integrations.enabled))
 
+    const previousGeneratedByIntegration: Partial<Record<IntegrationName, string>> = {}
     const generatedByIntegration: Partial<Record<IntegrationName, string>> = {}
     for (const hook of INTEGRATION_SYNC_HOOKS) {
       const committed = writesCommittedConfig(hook.id, config)
@@ -118,14 +132,8 @@ export async function performSync(options: SyncOptions): Promise<SyncResult> {
       if (enabled.has(hook.id)) {
         warnings.push(...generated.warnings)
       }
+      previousGeneratedByIntegration[hook.id] = await readTextOrEmpty(hook.generatedPath(paths))
       generatedByIntegration[hook.id] = generated.content
-      await writeManagedFile({
-        absolutePath: hook.generatedPath(paths),
-        content: generated.content,
-        projectRoot,
-        check,
-        changed
-      })
     }
 
     const claudeDesktopGenerated = renderClaudeDesktopMcp(resolved.serversByTarget.claude_desktop, projectRoot)
@@ -141,6 +149,7 @@ export async function performSync(options: SyncOptions): Promise<SyncResult> {
       changed
     })
 
+    const failedIntegrations = new Set<IntegrationName>()
     for (const hook of INTEGRATION_SYNC_HOOKS) {
       if (!hook.materialize) continue
       const hookEnabled = enabled.has(hook.id)
@@ -155,14 +164,29 @@ export async function performSync(options: SyncOptions): Promise<SyncResult> {
           warnings,
           config,
           generatedByIntegration,
+          previousGeneratedByIntegration,
           enabled: hookEnabled
         })
       } catch (error) {
         // One tool with a broken file used to abort the whole run, leaving the
         // integrations after it unwritten and the message with no name on it.
         const message = error instanceof Error ? error.message : String(error)
-        warnings.push(`${hook.id}: sync skipped after an error while writing its config. ${message}`)
+        failedIntegrations.add(hook.id)
+        errors.push(`${hook.id}: sync skipped after an error while writing its config. ${message}`)
       }
+    }
+
+    // Legacy previews establish ownership until adoption succeeds. A failed attempt
+    // must leave that evidence available to the next run.
+    for (const hook of INTEGRATION_SYNC_HOOKS) {
+      if (failedIntegrations.has(hook.id)) continue
+      await attempt(`${hook.id} preview`, () => writeManagedFile({
+        absolutePath: hook.generatedPath(paths),
+        content: generatedByIntegration[hook.id] ?? '',
+        projectRoot,
+        check,
+        changed
+      }))
     }
 
     const claudeScope = config.integrations.options.claudeScope
@@ -191,7 +215,7 @@ export async function performSync(options: SyncOptions): Promise<SyncResult> {
       paths
     })
 
-    await syncProjectMcpFile({
+    await attempt('Project MCP', () => syncProjectMcpFile({
       plan: projectMcpPlan,
       statePath: paths.generatedProjectMcpState,
       generatedPath: paths.generatedClaudeProjectMcp,
@@ -200,9 +224,9 @@ export async function performSync(options: SyncOptions): Promise<SyncResult> {
       changed,
       warnings,
       knownServerNames: Object.keys(config.mcp.servers)
-    })
+    }))
 
-    await syncClaude({
+    await attempt('Claude', () => syncClaude({
       // Project scope is a file, so the CLI path only runs when the user opted into local scope.
       // When switching from local to project, this still runs once with `enabled: false` to
       // remove the servers previously registered in ~/.claude.json.
@@ -213,9 +237,9 @@ export async function performSync(options: SyncOptions): Promise<SyncResult> {
       statePath: paths.generatedClaudeState,
       changed,
       warnings
-    })
+    }))
 
-    await syncClaudeDesktop({
+    await attempt('Claude Desktop', () => syncClaudeDesktop({
       enabled: enabled.has('claude_desktop'),
       check,
       projectRoot,
@@ -223,9 +247,9 @@ export async function performSync(options: SyncOptions): Promise<SyncResult> {
       statePath: paths.generatedClaudeDesktopState,
       changed,
       warnings
-    })
+    }))
 
-    await syncCursor({
+    await attempt('Cursor approvals', () => syncCursor({
       enabled: enabled.has('cursor'),
       autoApprove: config.integrations.options.cursorAutoApprove,
       check,
@@ -234,25 +258,25 @@ export async function performSync(options: SyncOptions): Promise<SyncResult> {
       statePath: paths.generatedCursorState,
       changed,
       warnings
-    })
+    }))
 
-    await syncSkills({
+    await attempt('Skills', () => syncSkills({
       projectRoot,
       enabledIntegrations: config.integrations.enabled,
       check,
       changed,
       warnings
-    })
+    }))
 
-    await syncClaudeInstructions({
+    await attempt('Claude instructions', () => syncClaudeInstructions({
       enabled: enabled.has('claude'),
       projectRoot,
       check,
       changed,
       warnings
-    })
+    }))
 
-    await syncVscodeSettings({
+    await attempt('VS Code settings', () => syncVscodeSettings({
       settingsPath: paths.vscodeSettings,
       statePath: paths.generatedVscodeSettingsState,
       hiddenPaths: config.workspace.vscode.hiddenPaths,
@@ -261,7 +285,11 @@ export async function performSync(options: SyncOptions): Promise<SyncResult> {
       changed,
       warnings,
       projectRoot
-    })
+    }))
+
+    if (errors.length > 0) {
+      throw new Error(`Sync incomplete:\n${errors.map(error => `- ${error}`).join('\n')}`)
+    }
 
     // Sync bookkeeping lives in .agents/generated (gitignored). Keeping it in the
     // committed config meant every teammate's sync produced a diff.
@@ -359,10 +387,8 @@ async function syncClaudeDesktop(args: {
     try {
       existing = await readClaudeDesktopConfig(configPath) as Record<string, unknown> | undefined
     } catch (error) {
-      warnings.push(
-        `Failed reading Claude Desktop config at ${configPath}; skipped Claude Desktop sync. ${error instanceof Error ? error.message : String(error)}`,
-      )
-      return
+      throw new Error(
+        `Failed reading Claude Desktop config at ${configPath}; skipped Claude Desktop sync. ${error instanceof Error ? error.message : String(error)}`)
     }
 
     let managedServers: Record<string, unknown> = {}
@@ -375,8 +401,7 @@ async function syncClaudeDesktop(args: {
           ? parsed.mcpServers
           : {}
       } catch (error) {
-        warnings.push(`Failed parsing generated Claude Desktop config: ${error instanceof Error ? error.message : String(error)}`)
-        return
+        throw new Error(`Failed parsing generated Claude Desktop config: ${error instanceof Error ? error.message : String(error)}`)
       }
     }
 
@@ -468,6 +493,9 @@ async function syncClaude(args: {
   }
 
   const desiredNames = enabled ? servers.map((server) => toManagedClaudeName(server.name)) : []
+  const definitionHashes = Object.fromEntries(servers.map(server => [
+    toManagedClaudeName(server.name), createHash('sha256').update(JSON.stringify(server)).digest('hex')
+  ]))
   let currentNames = state.managedNames ?? []
   const hasClaudeCli = commandExists(command)
 
@@ -483,11 +511,13 @@ async function syncClaude(args: {
     if (listed.ok) {
       currentNames = listed.names
     } else {
-      warnings.push(`Failed checking Claude MCP status: ${compactError(listed.stderr)}`)
+      throw new Error(`Failed checking Claude MCP status: ${compactError(listed.stderr)}`)
     }
   }
 
-  if (equalSets(new Set(currentNames), new Set(desiredNames))) {
+  const namesToUpdate = desiredNames.filter(name => currentNames.includes(name)
+    && state.definitionHashes?.[name] !== definitionHashes[name])
+  if (equalSets(new Set(currentNames), new Set(desiredNames)) && namesToUpdate.length === 0) {
     return
   }
   changed.push('claude-local-scope')
@@ -495,7 +525,9 @@ async function syncClaude(args: {
   if (check) return
 
   // Remove servers that exist in current but not in desired (proper set difference)
-  const namesToRemove = currentNames.filter((name) => !desiredNames.includes(name))
+  const namesToRemove = currentNames.filter((name) => !desiredNames.includes(name) || namesToUpdate.includes(name))
+  const errors: string[] = []
+  const failedRemovals = new Set<string>()
   for (const name of namesToRemove) {
     const removed = runCommand(command, ['mcp', 'remove', '-s', 'local', name], projectRoot)
     if (
@@ -503,28 +535,36 @@ async function syncClaude(args: {
       !removed.stderr.includes('not found') &&
       !removed.stderr.includes('No project-local MCP server found')
     ) {
-      warnings.push(`Failed removing Claude MCP server ${name}: ${compactError(removed.stderr)}`)
+      errors.push(`Failed removing Claude MCP server ${name}: ${compactError(removed.stderr)}`)
+      failedRemovals.add(name)
     }
   }
 
-  if (!enabled) {
-    await writeJsonAtomic(statePath, { managedNames: [] })
-    return
-  }
-
   const appliedNames: string[] = []
-  for (const server of servers) {
+  for (const server of enabled ? servers : []) {
     const name = toManagedClaudeName(server.name)
+    if (failedRemovals.has(name)) continue
+    if (currentNames.includes(name) && !namesToUpdate.includes(name)) {
+      appliedNames.push(name)
+      continue
+    }
     const result = addClaudeServer(command, projectRoot, name, server)
     if (!result.ok) {
-      warnings.push(`Failed adding Claude MCP server ${name}: ${compactError(result.stderr)}`)
+      errors.push(`Failed adding Claude MCP server ${name}: ${compactError(result.stderr)}`)
       continue
     }
     appliedNames.push(name)
   }
 
   await ensureDir(path.dirname(statePath))
-  await writeJsonAtomic(statePath, { managedNames: appliedNames })
+  await writeJsonAtomic(statePath, {
+    managedNames: [...new Set([...appliedNames, ...failedRemovals])],
+    definitionHashes: {
+      ...Object.fromEntries([...failedRemovals].map(name => [name, state.definitionHashes?.[name]])),
+      ...Object.fromEntries(appliedNames.map(name => [name, definitionHashes[name]]))
+    }
+  })
+  if (errors.length > 0) throw new Error(errors.join('\n'))
 }
 
 async function syncCursor(args: {

@@ -1,13 +1,18 @@
 import path from 'node:path'
+import { createHash } from 'node:crypto'
+import { spawnSync } from 'node:child_process'
+import { chmod, mkdtemp, readFile, readdir, realpath, rename, stat, writeFile } from 'node:fs/promises'
 import { copyDir, ensureDir, pathExists, readJson, removeIfExists, writeJsonAtomic } from './fs.js'
 import { discoverSkills } from './skillsDiscovery.js'
 import { getProjectPaths } from './paths.js'
-import { loadAgentsConfig, saveAgentsConfig } from './config.js'
+import { loadAgentsConfig, updateAgentsConfig } from './config.js'
+import { ensureProjectGitignore } from './gitignore.js'
 import { validateServerName } from './mcpValidation.js'
-import { isSecretLikeKey } from './mcpSecrets.js'
+import { isSecretArgFlag, isSecretLikeKey } from './mcpSecrets.js'
 import type { McpServerDefinition, McpTransportType } from '../types.js'
 
 export const PLUGIN_SPEC_VERSION = '1.0.0'
+const EXPORT_INVENTORY = '.agents-export.json'
 export const PLUGIN_MANIFEST_SCHEMA = `https://agent-plugins.org/schemas/${PLUGIN_SPEC_VERSION}/plugin.schema.json`
 export const PLUGIN_MCP_SCHEMA = `https://agent-plugins.org/schemas/${PLUGIN_SPEC_VERSION}/mcp.schema.json`
 
@@ -98,7 +103,9 @@ export function buildPluginMcp(servers: Record<string, McpServerDefinition>): {
 
   /** Rewrite the project placeholder and record every other variable the value needs. */
   const normalize = (value: string): string => {
-    const rewritten = value.replaceAll('${PROJECT_ROOT}', '${PLUGIN_ROOT}')
+    const rewritten = value
+      .replaceAll('${PROJECT_ROOT}/.agents/plugin-data/', '${PLUGIN_DATA}/')
+      .replaceAll('${PROJECT_ROOT}', '${PLUGIN_ROOT}')
     for (const match of rewritten.matchAll(/\$\{([A-Z0-9_]+)(?::-[^}]*)?\}/g)) {
       const key = match[1]
       if (key && !clientPlaceholders.has(key)) requiredEnv.add(key)
@@ -112,8 +119,8 @@ export function buildPluginMcp(servers: Record<string, McpServerDefinition>): {
    * Only a bare `${VAR}` reference is safe. `${VAR:-sk-live-...}` is not: the fallback
    * is a literal and travels with the package, and neither is `Bearer abc123`.
    */
-  const checkLiteralSecret = (serverName: string, field: string, key: string, value: string): void => {
-    if (!isSecretLikeKey(key)) return
+  const checkLiteralSecret = (serverName: string, field: string, key: string, value: string, credential = isSecretLikeKey(key)): void => {
+    if (!credential) return
     const withoutRefs = value.replace(/\$\{[A-Z0-9_]+\}/g, '')
     const hasReference = withoutRefs !== value
     const hasFallback = /\$\{[A-Z0-9_]+:-/.test(value)
@@ -132,8 +139,15 @@ export function buildPluginMcp(servers: Record<string, McpServerDefinition>): {
         warnings.push(`Server "${name}" has no command; skipped in the plugin.`)
         continue
       }
-      const command = normalize(server.command)
+      const command = normalize(server.command).replace(/^\$\{PLUGIN_ROOT\}\//, './')
       const args = (server.args ?? []).map(normalize)
+      for (const [index, arg] of args.entries()) {
+        const inline = arg.match(/^(--?[^=]+)=(.*)$/s)
+        const value = index > 0 && isSecretArgFlag(args[index - 1]) && !arg.startsWith('-')
+          ? arg
+          : inline && isSecretArgFlag(inline[1]) ? inline[2] : undefined
+        if (value !== undefined) checkLiteralSecret(name, 'args', String(index), value, true)
+      }
       const env = server.env
         ? Object.fromEntries(
             Object.entries(server.env).map(([key, value]) => {
@@ -232,28 +246,63 @@ export async function exportPlugin(options: ExportPluginOptions): Promise<Export
   }
 
   const outDir = path.resolve(options.outDir)
+  const [realOutput, realSource] = await Promise.all([
+    resolveProspectivePath(outDir), resolveProspectivePath(paths.agentsDir)
+  ])
+  if (containsPath(realOutput, realSource) || containsPath(realSource, realOutput)) {
+    throw new Error('Plugin output must not overlap the .agents source directory. Choose a separate output directory.')
+  }
+  const discovery = await discoverSkills(paths.agentsSkillsDir)
+  if (discovery.duplicates.length > 0) {
+    throw new Error(`Cannot export duplicate skill names: ${discovery.duplicates.map(item => item.name).join(', ')}.`)
+  }
+  const checkedGroups = new Set<string>()
+  for (const skill of discovery.skills.filter(item => item.relativePath.includes('/'))) {
+    if (await pathExists(path.join(paths.agentsSkillsDir, skill.name))) {
+      throw new Error(`Cannot flatten skill "${skill.relativePath}": "${skill.name}" is already a shared resource path.`)
+    }
+    for (let group = path.dirname(skill.sourcePath); group !== paths.agentsSkillsDir; group = path.dirname(group)) {
+      if (checkedGroups.has(group)) break
+      checkedGroups.add(group)
+      for (const entry of await readdir(group)) {
+        if (entry === '.git') continue
+        const candidate = path.join(group, entry)
+        if (!discovery.skills.some(item => containsPath(candidate, item.sourcePath))) {
+          throw new Error(`Cannot flatten skill "${skill.relativePath}" with shared resources in its group. Move supporting files inside each skill before exporting.`)
+        }
+      }
+    }
+  }
   await ensureDir(outDir)
   await writeJsonAtomic(path.join(outDir, 'plugin.json'), manifest)
   await writeJsonAtomic(path.join(outDir, 'mcp.json'), file)
+
+  // Imported servers retain their package-relative paths when bundled again.
+  // Ship only referenced snapshots, never the writable plugin-data directory.
+  const runtimeOut = path.join(outDir, '.agents/plugins')
+  if (!containsPath(realOutput, await resolveProspectivePath(runtimeOut))) {
+    throw new Error('Plugin runtime output must stay inside the output directory.')
+  }
+  await removeIfExists(runtimeOut)
+  const runtimeNames = new Set([...JSON.stringify(file).matchAll(/(?:\$\{PLUGIN_ROOT\}|\.)\/\.agents\/plugins\/([A-Za-z0-9_.-]+)/g)].map(match => match[1]))
+  for (const name of runtimeNames) {
+    if (name === '.' || name === '..') throw new Error('Plugin runtime path must stay inside .agents/plugins.')
+    await copyContainedPluginAssets(path.join(paths.agentsDir, 'plugins', name), path.join(runtimeOut, name))
+  }
 
   // Always replace the previous skills directory: a re-export of a project that lost a
   // skill must not keep shipping it.
   const skillsOut = path.join(outDir, 'skills')
   await removeIfExists(skillsOut)
 
-  let skillCount = 0
+  const skillCount = discovery.skills.length
   if (await pathExists(paths.agentsSkillsDir)) {
-    const discovery = await discoverSkills(paths.agentsSkillsDir)
-    skillCount = discovery.skills.length
-    if (skillCount > 0) {
-      // Symlinks are copied as symlinks: following them would pull files from outside
-      // the project into a package that gets published.
-      await copyDir(paths.agentsSkillsDir, skillsOut)
-    }
-    for (const duplicate of discovery.duplicates) {
-      warnings.push(`Skill name "${duplicate.name}" is duplicated; plugin clients expect unique skill names.`)
-    }
+    await copyContainedPluginAssets(paths.agentsSkillsDir, skillsOut)
   }
+  for (const skill of discovery.skills.filter(item => item.relativePath.includes('/'))) {
+    await copyContainedPluginAssets(skill.sourcePath, path.join(skillsOut, skill.name), paths.agentsSkillsDir)
+  }
+  await writeExportInventory(outDir)
 
   return {
     outDir,
@@ -264,13 +313,163 @@ export async function exportPlugin(options: ExportPluginOptions): Promise<Export
   }
 }
 
+/** Resolve symlinked ancestors even when the final output does not exist yet. */
+async function resolveProspectivePath(target: string): Promise<string> {
+  try {
+    return await realpath(target)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    const parent = path.dirname(target)
+    if (parent === target) throw error
+    return path.join(await resolveProspectivePath(parent), path.basename(target))
+  }
+}
+
+function containsPath(parent: string, child: string): boolean {
+  const relative = path.relative(parent, child)
+  return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative))
+}
+
+/** Materialize contained assets, retaining executable permissions and rejecting cycles. */
+async function copyContainedPluginAssets(sourceRoot: string, destinationRoot: string, boundaryRoot = sourceRoot, hash?: ReturnType<typeof createHash>, ignored = new Set<string>(), allowed?: Set<string>): Promise<void> {
+  const boundary = await realpath(boundaryRoot)
+  const isIgnored = (file: string): boolean => {
+    for (let current = file; containsPath(boundary, current); current = path.dirname(current)) {
+      if (ignored.has(current)) return true
+      if (current === boundary) break
+    }
+    return false
+  }
+  const copy = async (source: string, relative: string, ancestors: Set<string>): Promise<void> => {
+    if (isIgnored(source)) return
+    const resolved = await realpath(source)
+    if (isIgnored(resolved)) return
+    if (!containsPath(boundary, resolved)) {
+      throw new Error(`Plugin asset "${relative}" links outside the plugin directory.`)
+    }
+    if (allowed && !allowed.has(source)) return
+    const info = await stat(resolved)
+    const destination = path.join(destinationRoot, relative)
+    if (info.isDirectory()) {
+      if (ancestors.has(resolved)) throw new Error(`Plugin asset "${relative}" contains a symlink cycle.`)
+      await ensureDir(destination)
+      hash?.update(JSON.stringify(['directory', relative]))
+      const nextAncestors = new Set([...ancestors, resolved])
+      for (const entry of (await readdir(resolved)).sort()) {
+        if (entry === '.git') continue
+        await copy(path.join(resolved, entry), path.join(relative, entry), nextAncestors)
+      }
+    } else if (info.isFile()) {
+      const content = await readFile(resolved)
+      const mode = info.mode & 0o777
+      hash?.update(JSON.stringify(['file', relative, mode, content.length]))
+      hash?.update(content)
+      await writeFile(destination, content)
+      await chmod(destination, mode)
+    } else {
+      throw new Error(`Plugin asset "${relative}" is not a regular file or directory.`)
+    }
+  }
+  await copy(sourceRoot, '', new Set())
+}
+
+/** Record exactly the files produced by export, even when its output is gitignored. */
+async function writeExportInventory(outDir: string): Promise<void> {
+  const files: Record<string, string> = {}
+  const directories: string[] = []
+  const visit = async (relative: string): Promise<void> => {
+    const absolute = path.join(outDir, relative)
+    if (!(await pathExists(absolute))) return
+    if ((await stat(absolute)).isDirectory()) {
+      directories.push(relative)
+      for (const entry of (await readdir(absolute)).sort()) await visit(path.posix.join(relative, entry))
+    } else {
+      files[relative] = createHash('sha256').update(await readFile(absolute)).digest('hex')
+    }
+  }
+  for (const relative of ['plugin.json', 'mcp.json', 'skills', '.agents/plugins']) await visit(relative)
+  await writeJsonAtomic(path.join(outDir, EXPORT_INVENTORY), { version: 1, files, directories })
+}
+
+/** Trust an export inventory only for contained files whose contents still match it. */
+async function exportedPluginAssets(sourceRoot: string): Promise<Set<string> | undefined> {
+  const inventoryPath = path.join(sourceRoot, EXPORT_INVENTORY)
+  if (!(await pathExists(inventoryPath))) return undefined
+  const inventory = await readJson<{ version?: unknown; files?: unknown; directories?: unknown }>(inventoryPath)
+  const directories = inventory.directories ?? []
+  if (inventory.version !== 1 || !isStringRecord(inventory.files)
+    || !Array.isArray(directories) || !directories.every((entry): entry is string => typeof entry === 'string')
+    || !Object.hasOwn(inventory.files, 'plugin.json') || !Object.hasOwn(inventory.files, 'mcp.json')) {
+    throw new Error('Invalid plugin export inventory; export the package again.')
+  }
+  const allowed = new Set([sourceRoot, inventoryPath])
+  for (const relative of [...Object.keys(inventory.files), ...directories]) {
+    if (!relative || relative.includes('\\') || path.posix.isAbsolute(relative)
+      || path.posix.normalize(relative) !== relative || relative === '..' || relative.startsWith('../')) {
+      throw new Error('Plugin export inventory contains an unsafe path.')
+    }
+    const file = path.join(sourceRoot, relative)
+    const digest = inventory.files[relative]
+    const info = await stat(file)
+    const matches = digest === undefined ? info.isDirectory()
+      : info.isFile() && createHash('sha256').update(await readFile(file)).digest('hex') === digest
+    if (!containsPath(sourceRoot, await realpath(file)) || !matches) {
+      throw new Error(`Exported plugin asset "${relative}" changed; export the package again.`)
+    }
+    for (let current = file; current !== sourceRoot; current = path.dirname(current)) allowed.add(current)
+  }
+  return allowed
+}
+
+/** Honor Git's inherited, repository-local and global ignore rules for local assets. */
+async function ignoredPluginAssets(sourceRoot: string): Promise<Set<string>> {
+  let ancestor = sourceRoot
+  while (!(await pathExists(path.join(ancestor, '.git')))) {
+    const parent = path.dirname(ancestor)
+    if (parent === ancestor) return new Set()
+    ancestor = parent
+  }
+  const result = spawnSync('git', ['-C', ancestor, 'ls-files', '--others', '--ignored', '--exclude-standard', '--directory', '-z', '--', path.relative(ancestor, sourceRoot) || '.'], {
+    encoding: 'utf8', timeout: 10_000, maxBuffer: 16 * 1024 * 1024
+  })
+  if (result.status !== 0) throw new Error('Cannot read Git ignore rules for this plugin; refusing to copy potentially private files.')
+  const ignored = result.stdout.split('\0').filter(Boolean).map(file => path.resolve(ancestor, file))
+  if (ignored.some(file => containsPath(file, sourceRoot))) {
+    throw new Error('Plugin source is ignored by Git. Import a package produced by agents plugin export, or move the package outside the ignored directory.')
+  }
+  return new Set(ignored)
+}
+
+/** Install a self-contained snapshot without following links outside the package. */
+async function installPluginSnapshot(pluginDir: string, pluginsDir: string, name: string): Promise<string> {
+  const sourceRoot = await realpath(pluginDir)
+  const allowed = await exportedPluginAssets(sourceRoot)
+  const ignored = allowed ? new Set<string>() : await ignoredPluginAssets(sourceRoot)
+  const installRoot = await resolveProspectivePath(pluginsDir)
+  if (containsPath(sourceRoot, installRoot)) {
+    throw new Error('Plugin source must not contain its .agents/plugins installation directory.')
+  }
+  await ensureDir(installRoot)
+  const staging = await mkdtemp(path.join(installRoot, '.staging-'))
+  const hash = createHash('sha256')
+
+  try {
+    await copyContainedPluginAssets(sourceRoot, staging, sourceRoot, hash, ignored, allowed)
+    const installed = path.join(installRoot, `${name}-${hash.digest('hex')}`)
+    if (!(await pathExists(installed))) await rename(staging, installed)
+    return path.join(path.resolve(pluginsDir), path.basename(installed))
+  } finally {
+    await removeIfExists(staging)
+  }
+}
+
 /** Check that a value read from an untrusted plugin has the type the spec requires. */
 function isStringArray(value: unknown): boolean {
   return Array.isArray(value) && value.every((item) => typeof item === 'string')
 }
 
 /** Whether a value is an object whose values are all strings. */
-function isStringRecord(value: unknown): boolean {
+function isStringRecord(value: unknown): value is Record<string, string> {
   return (
     typeof value === 'object'
     && value !== null
@@ -392,9 +591,14 @@ export async function validatePlugin(pluginDir: string): Promise<ValidatePluginR
   const skillsDir = path.join(dir, 'skills')
   if (await pathExists(skillsDir)) {
     const discovery = await discoverSkills(skillsDir)
-    skillCount = discovery.skills.length
+    skillCount = discovery.skills.filter(skill => !skill.relativePath.includes('/')).length
+    for (const skill of discovery.skills.filter(skill => skill.relativePath.includes('/'))) {
+      warnings.push(`Skill "${skill.relativePath}" is nested; plugin clients only load immediate children of skills/.`)
+    }
     for (const duplicate of discovery.duplicates) {
-      errors.push(`Skill name "${duplicate.name}" appears more than once`)
+      if (duplicate.relativePaths.filter(relative => !relative.includes('/')).length > 1) {
+        errors.push(`Skill name "${duplicate.name}" appears more than once`)
+      }
     }
   }
 
@@ -447,78 +651,114 @@ export async function importPlugin(args: {
   const skippedServers: string[] = []
 
   const paths = getProjectPaths(args.projectRoot)
-  const config = await loadAgentsConfig(args.projectRoot)
+  const { result } = await updateAgentsConfig(args.projectRoot, async (config) => {
+    let installedDir: string | undefined
+    const install = async (): Promise<string> => {
+      installedDir ??= await installPluginSnapshot(dir, path.join(paths.agentsDir, 'plugins'), manifest.name)
+      return installedDir
+    }
+    const mcpPath = path.join(dir, 'mcp.json')
+    if (await pathExists(mcpPath)) {
+      const mcp = await readJson<PluginMcpFile>(mcpPath)
+      for (const [name, server] of Object.entries(mcp.mcpServers ?? {})) {
+        const targetName = prefix ? `${prefix}.${name}` : name
+        try {
+          validateServerName(targetName)
+        } catch (error) {
+          warnings.push(error instanceof Error ? error.message : String(error))
+          skippedServers.push(targetName)
+          continue
+        }
+        if (config.mcp.servers[targetName]) {
+          skippedServers.push(targetName)
+          continue
+        }
+        const installed = await install()
+        const relativeRoot = path.relative(args.projectRoot, installed).split(path.sep).join('/')
+        const pluginRoot = '${PROJECT_ROOT}/' + relativeRoot
+        const dataName = `${manifest.name}-${createHash('sha256').update(prefix).digest('hex').slice(0, 12)}`
+        const dataDir = path.join(paths.agentsPluginDataDir, dataName)
+        const pluginData = '${PROJECT_ROOT}/' + path.relative(args.projectRoot, dataDir).split(path.sep).join('/')
+        if (server.type === 'stdio') {
+          await ensureDir(dataDir)
+          await ensureProjectGitignore(args.projectRoot, config.syncMode)
+        }
+        // Keep the package root portable and separate from the consuming project root.
+        const toProjectPlaceholder = (value: string): string => value
+          .replaceAll('${PLUGIN_ROOT}', pluginRoot).replaceAll('${PLUGIN_DATA}', pluginData)
+        const toPluginPath = (value: string): string => {
+          const dataPath = value === '${PLUGIN_DATA}' || value.startsWith('${PLUGIN_DATA}/')
+          const rootPrefix = dataPath ? '${PLUGIN_DATA}' : '${PLUGIN_ROOT}'
+          const base = dataPath ? dataDir : installed
+          const portableBase = dataPath ? pluginData : pluginRoot
+          const relative = value.startsWith('./') ? value
+            : value === rootPrefix || value.startsWith(`${rootPrefix}/`) ? `.${value.slice(rootPrefix.length)}`
+              : undefined
+          if (relative === undefined) return toProjectPlaceholder(value)
+          const resolved = path.resolve(base, relative)
+          if (!containsPath(base, resolved)) throw new Error(`Plugin server "${name}" path "${value}" resolves outside the ${dataPath ? 'plugin data' : 'plugin'} directory.`)
+          const suffix = path.relative(base, resolved).split(path.sep).join('/')
+          return suffix ? `${portableBase}/${suffix}` : portableBase
+        }
+        const runtimeRoot = server.env?.PLUGIN_ROOT?.startsWith('${PLUGIN_ROOT}/')
+          ? toPluginPath(server.env.PLUGIN_ROOT) : pluginRoot
+        const runtimeData = server.env?.PLUGIN_DATA?.startsWith('${PLUGIN_DATA}/')
+          ? toPluginPath(server.env.PLUGIN_DATA) : pluginData
+        if (server.type === 'stdio') {
+          await ensureDir(runtimeData.replace('${PROJECT_ROOT}', path.resolve(args.projectRoot)))
+        }
+        config.mcp.servers[targetName] = server.type === 'stdio'
+          ? {
+              transport: 'stdio',
+              command: toPluginPath(server.command ?? ''),
+              ...(server.args ? { args: server.args.map(toProjectPlaceholder) } : {}),
+              env: {
+                ...Object.fromEntries(Object.entries(server.env ?? {}).map(([k, v]) => [k, toProjectPlaceholder(v)])),
+                PLUGIN_ROOT: runtimeRoot,
+                PLUGIN_DATA: runtimeData
+              },
+              cwd: toPluginPath(server.cwd ?? '${PLUGIN_ROOT}')
+            }
+          : {
+              transport: server.type === 'sse' ? 'sse' : 'http',
+              url: toProjectPlaceholder(server.url ?? ''),
+              ...(server.headers
+                ? {
+                    headers: Object.fromEntries(
+                      Object.entries(server.headers).map(([key, value]) => [key, toProjectPlaceholder(value)]),
+                    )
+                  }
+                : {})
+            }
+        addedServers.push(targetName)
 
-  const mcpPath = path.join(dir, 'mcp.json')
-  if (await pathExists(mcpPath)) {
-    const mcp = await readJson<PluginMcpFile>(mcpPath)
-    for (const [name, server] of Object.entries(mcp.mcpServers ?? {})) {
-      const targetName = prefix ? `${prefix}.${name}` : name
-      try {
-        validateServerName(targetName)
-      } catch (error) {
-        warnings.push(error instanceof Error ? error.message : String(error))
-        skippedServers.push(targetName)
-        continue
-      }
-      if (config.mcp.servers[targetName]) {
-        skippedServers.push(targetName)
-        continue
-      }
-      // ${PLUGIN_ROOT} becomes ${PROJECT_ROOT}: an absolute path here would be written
-      // into the committed config and break for everyone else who clones the repo.
-      const toProjectPlaceholder = (value: string): string => value.replaceAll('${PLUGIN_ROOT}', '${PROJECT_ROOT}')
-      config.mcp.servers[targetName] = server.type === 'stdio'
-        ? {
-            transport: 'stdio',
-            command: toProjectPlaceholder(server.command ?? ''),
-            ...(server.args ? { args: server.args.map(toProjectPlaceholder) } : {}),
-            ...(server.env
-              ? { env: Object.fromEntries(Object.entries(server.env).map(([k, v]) => [k, toProjectPlaceholder(v)])) }
-              : {}),
-            ...(server.cwd ? { cwd: toProjectPlaceholder(server.cwd) } : {})
-          }
-        : {
-            transport: server.type === 'sse' ? 'sse' : 'http',
-            url: toProjectPlaceholder(server.url ?? ''),
-            ...(server.headers
-              ? {
-                  headers: Object.fromEntries(
-                    Object.entries(server.headers).map(([key, value]) => [key, toProjectPlaceholder(value)]),
-                  )
-                }
-              : {})
-          }
-      addedServers.push(targetName)
-
-      // The package decides what runs on this machine the next time a tool starts the
-      // server. `validatePlugin` only checks the shape of the command, and a bare name
-      // like `sh` with `-c` passes it, so the reader is told what arrived.
-      if (server.type === 'stdio' && isShellInterpreter(server.command)) {
-        warnings.push(
-          `Server "${targetName}" runs "${server.command ?? ''}" with arguments from the package; `
-            + 'read them in .agents/agents.json before the next sync.',
-        )
+        // The package decides what runs on this machine the next time a tool starts the
+        // server. `validatePlugin` only checks the shape of the command, and a bare name
+        // like `sh` with `-c` passes it, so the reader is told what arrived.
+        if (server.type === 'stdio' && isShellInterpreter(server.command)) {
+          warnings.push(
+            `Server "${targetName}" runs "${server.command ?? ''}" with arguments from the package; `
+              + 'read them in .agents/agents.json before the next sync.',
+          )
+        }
       }
     }
-  }
 
-  const addedSkills: string[] = []
-  const pluginSkills = path.join(dir, 'skills')
-  if (await pathExists(pluginSkills)) {
-    const discovery = await discoverSkills(pluginSkills)
-    for (const skill of discovery.skills) {
-      const targetDir = path.join(paths.agentsSkillsDir, skill.name)
-      if (await pathExists(targetDir)) {
-        warnings.push(`Skill "${skill.name}" already exists in .agents/skills; left untouched.`)
-        continue
+    const addedSkills: string[] = []
+    const pluginSkills = path.join(dir, 'skills')
+    if (await pathExists(pluginSkills)) {
+      const discovery = await discoverSkills(path.join(await install(), 'skills'))
+      for (const skill of discovery.skills.filter(skill => !skill.relativePath.includes('/'))) {
+        const targetDir = path.join(paths.agentsSkillsDir, skill.name)
+        if (await pathExists(targetDir)) {
+          warnings.push(`Skill "${skill.name}" already exists in .agents/skills; left untouched.`)
+          continue
+        }
+        await copyDir(path.dirname(skill.skillFilePath), targetDir, { dereference: true })
+        addedSkills.push(skill.name)
       }
-      await copyDir(path.dirname(skill.skillFilePath), targetDir)
-      addedSkills.push(skill.name)
     }
-  }
-
-  await saveAgentsConfig(args.projectRoot, config)
-
-  return { addedServers, skippedServers, addedSkills, warnings }
+    return { addedServers, skippedServers, addedSkills, warnings }
+  })
+  return result
 }

@@ -296,9 +296,27 @@ than started, and every probe has a timeout.
 package: `plugin.json`, `mcp.json` and `skills/`. It reads `.agents/agents.json` only,
 never `local.json`, so a package carries `${VAR}` placeholders instead of secrets.
 `${PROJECT_ROOT}` becomes the specification's `${PLUGIN_ROOT}`.
+Immediate skills keep shared resources beside them. Grouped skills are flattened only
+when their grouping directories contain skills alone. Move group-level supporting files
+inside each skill before exporting, so flattening cannot silently break relative paths.
 
 `agents plugin import` goes the other way, prefixing imported server names with the
-plugin name so nothing already defined is replaced.
+plugin name so nothing already defined is replaced. Scripts and resources are installed
+in a content-addressed snapshot under `.agents/plugins/`; `${PLUGIN_ROOT}` points
+to that snapshot through a portable `${PROJECT_ROOT}` path. Commit the snapshot
+alongside `.agents/agents.json` so the imported servers also work in other clones.
+Links outside the package are rejected.
+
+Local plugin checkouts exclude files ignored by Git, including parent and local ignore
+rules. Exported bundles include `.agents-export.json`, a list of exported files and
+their hashes, so import also works from an ignored `dist/agent-plugin` directory.
+Files added beside the exported package are excluded. If an exported file changes,
+export it again before importing.
+
+Imported stdio servers receive `PLUGIN_ROOT` and `PLUGIN_DATA` in their environment.
+`${PLUGIN_DATA}` resolves to a writable directory under `.agents/plugin-data/`, which
+is gitignored and retained across package updates. Sync recreates missing data directories
+after a clone without changing them during `sync --check`.
 
 ## MCP Server Format
 

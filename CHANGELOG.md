@@ -9,6 +9,102 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - No changes yet.
 
+## [0.9.2] - 2026-10-12
+
+### Fixed
+
+- Plugin export retains shared files and directories beside immediate skills. Grouped exports reject shared group resources or conflicting flattened names before writing, instead of silently breaking relative imports.
+
+- Reset uses saved ownership even when previews are missing or corrupt, and reconstructs matching public definitions to clean commit-generated clones safely.
+
+- Antigravity updates its workspace even if legacy global cleanup fails, retaining separate pending legacy ownership for a later retry.
+
+- Disabled Codex, Grok and VS Code hiding leave unrelated malformed configs untouched instead of failing a sync with no managed settings to clean.
+
+- Project MCP ownership uses portable relative paths; moved legacy projects recover ownership only where the saved preview still matches the local config.
+
+- Legacy sync and reset ownership comparisons ignore JSON property order while preserving servers whose values or argument order differ.
+
+- Plugin snapshots exclude local files ignored by Git, including inherited rules, local excludes and links to ignored credentials. Export inventories keep bundles in ignored output directories importable, retain empty runtime directories, exclude later local files and reject changed exported assets.
+
+- Re-exported plugins include their imported runtime snapshots and preserve executable command paths and nested runtime roots, while writable plugin data stays private and is recreated on import, sync or budget.
+
+- MCP add and import preserve reference-only authorization headers such as `Bearer ${TOKEN}` while keeping literal credentials and fallbacks local.
+
+- Automatic update checks start after the command finishes, so optional metadata writes cannot lock out MCP edits or sync.
+
+- HTTP MCP probes consume matching SSE replies incrementally, handling split UTF-8 and multiline events without waiting for the server to close its stream.
+
+- HTTP MCP budget uses one per-server deadline across protocol negotiation, initialization and every tools/list page instead of resetting the timeout for each request.
+
+- HTTP MCP budget honors bearerTokenEnvVar, preserves explicit authorization headers and reports missing or invalid credentials without printing token values.
+
+- Doctor reports missing configs for integrations with selected MCP servers and repairs them with --fix, while allowing absent configs for empty profiles and respecting Claude scope.
+
+- Doctor rechecks managed config syntax after applying fixes, so repaired errors no longer force a failure while unrelated source errors remain visible.
+
+- Runtime MCP tests check only integrations and servers selected by the effective configuration and active profile, leaving unrelated installed CLIs unprobed.
+
+- Runtime MCP tests skip disabled servers, including local overrides, without probing CLIs when no active servers remain.
+
+- MCP test resolves environment, fallback and project-root placeholders before validation while keeping substituted values out of error output.
+
+- MCP import preserves and validates schema 4 auth, timeout and tool restriction fields, including empty allowlists; OAuth client secrets are kept in local overrides.
+
+- Plugin export flattens self-contained grouped skills with resources stored inside each skill and rejects duplicate output names; validation and import count only standard immediate-child skills.
+
+- Plugin export materializes internal skill links portably, retains executable permissions and refuses escaping resources, so its own bundles can be imported after removing their sources.
+
+- Imported stdio plugin servers receive PLUGIN_ROOT and PLUGIN_DATA, with portable, gitignored data storage retained across package updates and recreated by sync or budget after cloning.
+
+- Imported plugin command and cwd paths resolve independently against the installed snapshot, remain portable and reject paths escaping its root.
+
+- Claude local-scope CLI read and write failures fail sync, retain failed-removal ownership and do not advance successful-sync state.
+
+- Claude local-scope sync refreshes changed definitions and credentials even when server names stay the same, storing only definition hashes in ownership state.
+
+- Reset retains comments and disabled settings in Zed and Kilo JSONC files, including after removing the final managed server.
+
+- Failed integration syncs retain legacy previews until ownership adoption succeeds, allowing retries to remove previously generated servers.
+
+- Project MCP sync records every successfully applied target and retains failed cleanup ownership before reporting partial errors, so retries remove stale servers.
+
+- Plugin export rejects literal credentials in separate and inline token arguments unless explicitly allowed, including unsafe placeholder fallbacks.
+
+- Forced template initialization replaces destination symlinks atomically instead of overwriting their external targets.
+
+- Antigravity rejects skill roots and grouping directories that resolve outside the project before dereferencing their contents.
+
+- Update checks lock local.json metadata writes and defer them while configuration changes are in progress, preventing lost MCP secrets.
+
+- MCP add automatically moves secret-looking env and header values into local.json, matching import and the documented security behavior.
+
+- Reset preserves manual servers in project MCP files absent from an existing applied ownership record, including after disconnect.
+
+- Reset uses applied ownership records instead of preview names, preserving same-named manual servers and cleaning previously applied servers after a failed sync.
+
+- Updated transitive `source-map-js` to 1.2.2 to remove its reported high-severity vulnerability.
+
+- Updated transitive `brace-expansion` dependencies to 5.0.12 and 1.1.21 to remove the reported denial-of-service vulnerabilities.
+
+- Plugin import installs scripts and resources under `.agents/plugins` and points portable `${PLUGIN_ROOT}` references to that snapshot. Escaping links are rejected and executable permissions are preserved.
+
+- Watch retries unchanged source files after a failed sync instead of remembering the failed attempt as already applied.
+
+- Sync and `sync --check` fail when an integration config cannot be read or written, after attempting the remaining integrations. Failed runs no longer update the successful-sync timestamp.
+
+- Profile changes, connect/disconnect and plugin import lock the full config update and reload current state after prompts, preventing concurrent edits from being lost.
+
+- Plugin export rejects output paths overlapping `.agents`, including paths through symlinked parents, before writing or deleting source files.
+
+- Disconnect removes managed MCP servers from Gemini, OpenCode, Cursor, VS Code and Junie while preserving manual entries.
+
+- Sync preserves manual MCP entries and settings in Gemini, OpenCode, Cursor, VS Code and Junie, tracking ownership to remove only stale generated servers.
+
+- Safe reset preserves manual MCP servers and settings in Cursor, Antigravity, VS Code and Junie configs, removing only agents-managed entries.
+
+- New OpenCode configs and configs with a missing or empty `$schema` receive `"$schema": "https://opencode.ai/config.json"`. Existing nonempty custom schemas and unrelated settings are preserved. A from-scratch sync previously wrote `{ "mcp": {} }` only.
+
 ## [0.9.1] - 2026-09-13
 
 ### Added

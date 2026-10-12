@@ -1,13 +1,15 @@
 import path from 'node:path'
+import { isDeepStrictEqual } from 'node:util'
 import { lstat, readlink, readdir, rmdir } from 'node:fs/promises'
-import { applyEdits as applyJsoncEdits, modify as modifyJsonc, parse as parseJsonc } from 'jsonc-parser'
+import { applyEdits as applyJsoncEdits, createScanner, modify as modifyJsonc, parse as parseJsonc, SyntaxKind } from 'jsonc-parser'
 import { cleanupManagedGitignore } from '../core/gitignore.js'
 import { readGooseDocument, readGooseExtensions, setGooseExtensions, writeGooseConfig } from '../core/goose.js'
 import { getProjectPaths } from '../core/paths.js'
 import type { ProjectPaths } from '../core/paths.js'
 import { loadAgentsConfig } from '../core/config.js'
-import { loadResolvedRegistry } from '../core/mcp.js'
+import { loadResolvedRegistry, resolveFromConfigAndLocal } from '../core/mcp.js'
 import { INTEGRATIONS } from '../integrations/registry.js'
+import { INTEGRATION_SYNC_HOOKS } from '../integrations/syncHooks.js'
 import { toProjectScopedName } from '../core/globalScope.js'
 import { readProjectMcpManagedNames } from '../core/projectMcp.js'
 import {
@@ -91,6 +93,7 @@ export async function runReset(options: ResetOptions): Promise<void> {
     projectRoot,
     configPath: paths.geminiSettings,
     generatedPath: paths.generatedGemini,
+    statePath: paths.generatedGeminiState,
     removed,
     warnings
   })
@@ -98,6 +101,7 @@ export async function runReset(options: ResetOptions): Promise<void> {
     projectRoot,
     configPath: paths.opencodeConfig,
     generatedPath: paths.generatedOpencode,
+    statePath: paths.generatedOpencodeState,
     removed,
     warnings
   })
@@ -120,6 +124,7 @@ export async function runReset(options: ResetOptions): Promise<void> {
         projectRoot,
         configPath: paths[descriptor.pathKey],
         generatedPath: paths[managed.generatedPathKey],
+        statePath: paths[managed.statePathKey],
         removed,
         warnings
       },
@@ -159,13 +164,15 @@ export async function runReset(options: ResetOptions): Promise<void> {
     await removeResetTarget(bridge.bridgePath, projectRoot, removed)
   }
 
-  const targets = [
-    paths.cursorMcp,
-    paths.antigravityWorkspaceMcp,
-    paths.antigravityProjectMcp,
-    paths.vscodeMcp,
-    paths.junieMcp
-  ]
+  await cleanupKeyedJsonConfig({
+    projectRoot,
+    configPath: paths.antigravityProjectMcp,
+    generatedPath: paths.generatedAntigravity,
+    removed,
+    warnings
+  }, 'legacy Antigravity', 'mcpServers')
+
+  const targets: string[] = []
   if (!options.localOnly) {
     targets.push(paths.generatedDir)
   }
@@ -214,7 +221,7 @@ async function cleanupGeminiConfig(args: JsonConfigCleanupArgs): Promise<void> {
     return
   }
 
-  const generated = await readGeneratedObjectForCleanup(args.generatedPath, 'Gemini', args.warnings)
+  const generated = await readGeneratedObjectForCleanup(args, 'Gemini')
   if (generated === null) return
 
   const cleaned = { ...existing }
@@ -231,7 +238,7 @@ async function cleanupGeminiConfig(args: JsonConfigCleanupArgs): Promise<void> {
   if (cleaned.contextFileName === generated.contextFileName) {
     delete cleaned.contextFileName
   }
-  removeManagedMapEntries(cleaned, generated, 'mcpServers')
+  await removeManagedMapEntries(args, cleaned, generated, 'mcpServers')
 
   await persistCleanedJsonConfig(args, existing, cleaned)
 }
@@ -245,11 +252,11 @@ async function cleanupOpencodeConfig(args: JsonConfigCleanupArgs): Promise<void>
     return
   }
 
-  const generated = await readGeneratedObjectForCleanup(args.generatedPath, 'OpenCode', args.warnings)
+  const generated = await readGeneratedObjectForCleanup(args, 'OpenCode')
   if (generated === null) return
 
   const cleaned = { ...existing }
-  removeManagedMapEntries(cleaned, generated, 'mcp')
+  await removeManagedMapEntries(args, cleaned, generated, 'mcp')
   await persistCleanedJsonConfig(args, existing, cleaned)
 }
 
@@ -257,6 +264,7 @@ interface JsonConfigCleanupArgs {
   projectRoot: string
   configPath: string
   generatedPath: string
+  statePath?: string
   removed: string[]
   warnings: string[]
 }
@@ -283,40 +291,71 @@ async function readConfigObjectForCleanup(
   }
 }
 
-/** Read generated ownership state used to identify managed JSON entries. */
+/** Read a preview when available, without making it a prerequisite for applied ownership. */
 async function readGeneratedObjectForCleanup(
-  generatedPath: string,
+  args: JsonConfigCleanupArgs,
   label: string,
-  warnings: string[],
 ): Promise<Record<string, unknown> | null> {
-  if (!(await pathExists(generatedPath))) {
-    warnings.push(`Could not identify managed ${label} settings because ${generatedPath} is missing; preserved the config file.`)
-    return null
-  }
   try {
-    const parsed = await readJson<unknown>(generatedPath)
-    if (!isRecord(parsed)) {
-      warnings.push(`Could not identify managed ${label} settings because ${generatedPath} is not a JSON object; preserved the config file.`)
-      return null
-    }
-    return parsed
-  } catch (error) {
-    warnings.push(
-      `Could not identify managed ${label} settings because ${generatedPath} could not be read; preserved the config file. ${error instanceof Error ? error.message : String(error)}`,
-    )
-    return null
+    const parsed = await readJson<unknown>(args.generatedPath)
+    if (isRecord(parsed)) return parsed
+  } catch {
+    // A preview is disposable; the applied ownership record remains authoritative.
   }
+  if (args.statePath && await pathExists(args.statePath)) return {}
+
+  // A commit-generated clone has configs but no local preview/state. Reconstruct
+  // only the selected public definition, then require a structural content match.
+  try {
+    const config = await loadAgentsConfig(args.projectRoot)
+    const paths = getProjectPaths(args.projectRoot)
+    const hook = INTEGRATION_SYNC_HOOKS.find(item => item.generatedPath(paths) === args.generatedPath)
+    if (config.syncMode === 'commit-generated' && hook && config.integrations.enabled.includes(hook.id)) {
+      const resolved = resolveFromConfigAndLocal({
+        projectRoot: args.projectRoot,
+        servers: Object.fromEntries(Object.entries(config.mcp.servers).map(([name, server]) => [name, { ...server, requiredEnv: [] }])),
+        local: { mcpServers: {} },
+        profile: config.activeProfile ? config.profiles?.[config.activeProfile] : undefined
+      })
+      const generated: unknown = JSON.parse(hook.buildGenerated(resolved.publicServersByTarget[hook.id]).content)
+      if (isRecord(generated)) return generated
+    }
+  } catch {
+    // Unknown source definitions cannot establish ownership.
+  }
+  args.warnings.push(`Could not identify managed ${label} settings because ${args.generatedPath} is unavailable; preserved the config file.`)
+  return null
 }
 
 /** Remove generated map keys from a materialized JSON object without touching unknown entries. */
-function removeManagedMapEntries(
+async function removeManagedMapEntries(
+  args: JsonConfigCleanupArgs,
   cleaned: Record<string, unknown>,
   generated: Record<string, unknown>,
   key: string,
-): void {
-  if (!isRecord(cleaned[key]) || !isRecord(generated[key])) return
+): Promise<void> {
+  if (!isRecord(cleaned[key])) return
   const remaining = { ...cleaned[key] }
-  for (const managedName of Object.keys(generated[key])) {
+  let managedNames: string[]
+  if (args.statePath && await pathExists(args.statePath)) {
+    try {
+      const state = await readJson<{ managedNames?: unknown }>(args.statePath)
+      if (!Array.isArray(state.managedNames) || !state.managedNames.every(name => typeof name === 'string')) {
+        throw new Error('Invalid managedNames')
+      }
+      managedNames = state.managedNames
+    } catch {
+      args.warnings.push(`Could not read ownership at ${args.statePath}; preserved MCP entries.`)
+      return
+    }
+  } else {
+    // A preview is generated for disabled integrations too. Only matching content
+    // can identify legacy ownership when no applied-state record exists.
+    const preview = isRecord(generated[key]) ? generated[key] : {}
+    managedNames = Object.keys(preview).filter(name =>
+      isDeepStrictEqual(remaining[name], preview[name]))
+  }
+  for (const managedName of managedNames) {
     delete remaining[managedName]
   }
   if (Object.keys(remaining).length === 0) {
@@ -485,15 +524,16 @@ async function cleanupKeyedJsonConfig(
     : await readConfigObjectForCleanup(args.configPath, label, args.warnings)
   if (existing === null) return
   if (Object.keys(existing).length === 0) {
+    if (options?.jsonc && hasJsoncComments(await readTextOrEmpty(args.configPath))) return
     await removeResetTarget(args.configPath, args.projectRoot, args.removed)
     return
   }
 
-  const generated = await readGeneratedObjectForCleanup(args.generatedPath, label, args.warnings)
+  const generated = await readGeneratedObjectForCleanup(args, label)
   if (generated === null) return
 
   const cleaned = { ...existing }
-  removeManagedMapEntries(cleaned, generated, key)
+  await removeManagedMapEntries(args, cleaned, generated, key)
 
   if (options?.jsonc) {
     await persistCleanedJsoncConfig(args, existing, cleaned, key)
@@ -510,18 +550,31 @@ async function persistCleanedJsoncConfig(
   key: string,
 ): Promise<void> {
   if (JSON.stringify(cleaned) === JSON.stringify(existing)) return
-  if (Object.keys(cleaned).length === 0) {
+  const raw = await readTextOrEmpty(args.configPath)
+  if (Object.keys(cleaned).length === 0 && !hasJsoncComments(raw)) {
     await removeResetTarget(args.configPath, args.projectRoot, args.removed)
     return
   }
 
-  const raw = await readTextOrEmpty(args.configPath)
-  const edits = modifyJsonc(raw, [key], cleaned[key], {
+  // Deleting a property can consume the leading comments attached to it. An empty
+  // server map keeps those comments without leaving any managed entries active.
+  const value = cleaned[key] === undefined && hasJsoncComments(raw) ? {} : cleaned[key]
+  const edits = modifyJsonc(raw, [key], value, {
     formattingOptions: { insertSpaces: true, tabSize: 2 }
   })
   const applied = applyJsoncEdits(raw, edits)
+  if (applied === raw) return
   await writeTextAtomic(args.configPath, applied.endsWith('\n') ? applied : `${applied}\n`)
   args.removed.push(path.relative(args.projectRoot, args.configPath) || args.configPath)
+}
+
+/** Comments remain user content even when a JSONC object has no active settings. */
+function hasJsoncComments(raw: string): boolean {
+  const scanner = createScanner(raw)
+  for (let token = scanner.scan(); token !== SyntaxKind.EOF; token = scanner.scan()) {
+    if (token === SyntaxKind.LineCommentTrivia || token === SyntaxKind.BlockCommentTrivia) return true
+  }
+  return false
 }
 
 /** Read a JSONC settings file for cleanup, tolerating comments and trailing commas. */
@@ -711,6 +764,7 @@ async function cleanupProjectMcpFiles(args: {
 }): Promise<void> {
   const { projectRoot, paths, removed, warnings } = args
 
+  const hasState = await pathExists(paths.generatedProjectMcpState)
   const managedByFile = await readProjectMcpManagedNames(paths.generatedProjectMcpState, projectRoot)
   let fallbackNames: string[] = []
   try {
@@ -723,7 +777,7 @@ async function cleanupProjectMcpFiles(args: {
   for (const targetPath of [paths.copilotCliMcp, paths.copilotCliGithubMcp]) {
     if (!(await pathExists(targetPath))) continue
 
-    const managedNames = managedByFile[targetPath] ?? fallbackNames
+    const managedNames = managedByFile[targetPath] ?? (hasState ? [] : fallbackNames)
 
     let parsed: unknown
     try {
