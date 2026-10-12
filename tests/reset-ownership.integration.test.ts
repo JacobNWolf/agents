@@ -3,6 +3,7 @@ import path from 'node:path'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { runReset } from '../src/commands/reset.js'
+import { createDefaultAgentsConfig, saveAgentsConfig } from '../src/core/config.js'
 
 const tempDirs: string[] = []
 const configs = [
@@ -26,6 +27,22 @@ async function fixture(): Promise<string> {
 }
 
 describe('reset config ownership', () => {
+  it.each([true, false])('preserves same-named manual project MCP with applied state (managed=%s)', async managed => {
+    const projectRoot = await fixture()
+    await saveAgentsConfig(projectRoot, createDefaultAgentsConfig({ mcpServers: {
+      shared: { transport: 'stdio', command: 'managed' }
+    } }))
+    await mkdir(path.join(projectRoot, '.agents/generated'), { recursive: true })
+    await mkdir(path.join(projectRoot, '.github'), { recursive: true })
+    await writeFile(path.join(projectRoot, '.agents/generated/project-mcp.state.json'), JSON.stringify({
+      files: managed ? { [path.join(projectRoot, '.mcp.json')]: ['shared'] } : {}
+    }))
+    const manual = { mcpServers: { shared: { command: 'manual' } }, custom: true }
+    await writeFile(path.join(projectRoot, '.github/mcp.json'), JSON.stringify(manual))
+    await runReset({ projectRoot, localOnly: true, hard: false })
+    expect(JSON.parse(await readFile(path.join(projectRoot, '.github/mcp.json'), 'utf8'))).toEqual(manual)
+  })
+
   it.each([true, false])('preserves unmanaged config entries (localOnly=%s)', async localOnly => {
     const projectRoot = await fixture()
     for (const [relative, , key] of configs) {

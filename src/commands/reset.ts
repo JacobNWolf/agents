@@ -737,6 +737,7 @@ async function cleanupProjectMcpFiles(args: {
 }): Promise<void> {
   const { projectRoot, paths, removed, warnings } = args
 
+  const hasState = await pathExists(paths.generatedProjectMcpState)
   const managedByFile = await readProjectMcpManagedNames(paths.generatedProjectMcpState, projectRoot)
   let fallbackNames: string[] = []
   try {
@@ -749,7 +750,7 @@ async function cleanupProjectMcpFiles(args: {
   for (const targetPath of [paths.copilotCliMcp, paths.copilotCliGithubMcp]) {
     if (!(await pathExists(targetPath))) continue
 
-    const managedNames = managedByFile[targetPath] ?? fallbackNames
+    const managedNames = managedByFile[targetPath] ?? (hasState ? [] : fallbackNames)
 
     let parsed: unknown
     try {

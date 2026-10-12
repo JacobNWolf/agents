@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Reset preserves manual servers in project MCP files absent from an existing applied ownership record, including after disconnect.
+
 - Reset uses applied ownership records instead of preview names, preserving same-named manual servers and cleaning previously applied servers after a failed sync.
 
 - Updated transitive `source-map-js` to 1.2.2 to remove its reported high-severity vulnerability.
