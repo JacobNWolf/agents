@@ -244,6 +244,7 @@ export async function syncProjectMcpFile(args: {
 
   const nextFiles: Record<string, string[]> = {}
   const generatedPreview: Record<string, Record<string, unknown>> = {}
+  const errors: string[] = []
 
   for (const target of plan.targets) {
     const rendered = renderProjectMcpJson(target.servers, {
@@ -255,48 +256,60 @@ export async function syncProjectMcpFile(args: {
     // belongs where, and identical names would shadow each other.
     generatedPreview[path.relative(projectRoot, target.targetPath) || target.targetPath] = rendered.mcpServers
 
-    const written = await writeProjectMcpTarget({
-      targetPath: target.targetPath,
-      managedServers: rendered.mcpServers,
-      previousManagedNames: previousFiles[target.targetPath] ?? (hasState ? [] : knownServerNames ?? []),
-      adopting: !hasState && previousFiles[target.targetPath] === undefined,
-      projectRoot,
-      check,
-      changed,
-      warnings
-    })
-    nextFiles[target.targetPath] = written
+    const previousManagedNames = previousFiles[target.targetPath] ?? (hasState ? [] : knownServerNames ?? [])
+    try {
+      nextFiles[target.targetPath] = await writeProjectMcpTarget({
+        targetPath: target.targetPath,
+        managedServers: rendered.mcpServers,
+        previousManagedNames,
+        adopting: !hasState && previousFiles[target.targetPath] === undefined,
+        projectRoot,
+        check,
+        changed,
+        warnings
+      })
+    } catch (error) {
+      nextFiles[target.targetPath] = previousManagedNames
+      errors.push(error instanceof Error ? error.message : String(error))
+    }
   }
 
-  await writeManagedFile({
-    absolutePath: generatedPath,
-    content: `${JSON.stringify({ files: generatedPreview }, null, 2)}\n`,
-    projectRoot,
-    check,
-    changed
-  })
+  try {
+    await writeManagedFile({
+      absolutePath: generatedPath,
+      content: `${JSON.stringify({ files: generatedPreview }, null, 2)}\n`,
+      projectRoot,
+      check,
+      changed
+    })
+  } catch (error) {
+    errors.push(error instanceof Error ? error.message : String(error))
+  }
 
   // Files this run no longer owns lose their managed entries. If the cleanup cannot be
   // done, the names stay in state: otherwise the next sync would not know what to remove
   // once the file is readable again.
   for (const [file, managedNames] of Object.entries(previousFiles)) {
     if (nextFiles[file] !== undefined) continue
-    const cleaned = await cleanupProjectMcpFile({
-      targetPath: file,
-      managedNames,
-      projectRoot,
-      check,
-      changed,
-      warnings
-    })
-    if (!cleaned) {
+    try {
+      await cleanupProjectMcpFile({
+        targetPath: file,
+        managedNames,
+        projectRoot,
+        check,
+        changed,
+        warnings
+      })
+    } catch (error) {
       nextFiles[file] = managedNames
+      errors.push(error instanceof Error ? error.message : String(error))
     }
   }
 
   if (!check) {
     await writeStateFiles(statePath, nextFiles)
   }
+  if (errors.length > 0) throw new Error(errors.join('\n'))
 }
 
 /**
