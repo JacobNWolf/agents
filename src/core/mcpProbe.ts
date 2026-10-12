@@ -712,6 +712,15 @@ async function probeHttpServer(server: ResolvedMcpServer, timeoutMs: number): Pr
     error
   })
 
+  const tokenVariable = server.bearerTokenEnvVar
+  if (tokenVariable && !Object.keys(baseHeaders).some(key => key.toLowerCase() === 'authorization')) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(tokenVariable)) return fail('Invalid bearer token environment variable name.')
+    const token = process.env[tokenVariable]
+    if (!token) return fail(`Bearer token environment variable is not set: ${tokenVariable}`)
+    if (/[^\x20-\x7e]/.test(token)) return fail(`Bearer token environment variable contains invalid header characters: ${tokenVariable}`)
+    baseHeaders.Authorization = `Bearer ${token}`
+  }
+
   try {
     let version = PROTOCOL_VERSION
     let attempt = await requestModernToolsList(url, baseHeaders, version, timeoutMs)
