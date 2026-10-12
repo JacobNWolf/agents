@@ -497,9 +497,46 @@ async function postJsonRpc(
       body: JSON.stringify(body),
       signal: controller.signal
     })
-    return { response, text: await response.text() }
+    const requestId = typeof body === 'object' && body !== null && 'id' in body ? body.id : undefined
+    const streaming = (response.headers.get('content-type') ?? '').toLowerCase().includes('text/event-stream')
+    const text = streaming && (typeof requestId === 'number' || typeof requestId === 'string')
+      ? await readSseReply(response, requestId) : await response.text()
+    return { response, text }
   } finally {
     clearTimeout(timer)
+  }
+}
+
+/** Stop reading an SSE POST as soon as its matching JSON-RPC reply is complete. */
+async function readSseReply(response: Response, requestId: string | number): Promise<string> {
+  if (!response.body) return ''
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  const reply = (event: string): string | undefined => {
+    const message = parseRpcBody(event)
+    if (message?.id !== requestId || typeof message.method === 'string') return undefined
+    if (message.result === undefined && message.error === undefined) return undefined
+    return JSON.stringify(message)
+  }
+  try {
+    for (;;) {
+      const chunk = await reader.read()
+      if (chunk.done) return reply(buffer + decoder.decode()) ?? ''
+      buffer += decoder.decode(chunk.value, { stream: true })
+      let boundary: RegExpExecArray | null
+      while ((boundary = /\r?\n\r?\n/.exec(buffer)) !== null) {
+        const event = buffer.slice(0, boundary.index)
+        buffer = buffer.slice(boundary.index + boundary[0].length)
+        const text = reply(event)
+        if (text !== undefined) {
+          await reader.cancel().catch(() => {})
+          return text
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock()
   }
 }
 

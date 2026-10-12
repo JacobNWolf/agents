@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- HTTP MCP probes consume matching SSE replies incrementally, handling split UTF-8 and multiline events without waiting for the server to close its stream.
+
 - HTTP MCP budget uses one per-server deadline across protocol negotiation, initialization and every tools/list page instead of resetting the timeout for each request.
 
 - HTTP MCP budget honors bearerTokenEnvVar, preserves explicit authorization headers and reports missing or invalid credentials without printing token values.
