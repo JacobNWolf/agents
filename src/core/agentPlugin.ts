@@ -1,5 +1,6 @@
 import path from 'node:path'
 import { createHash } from 'node:crypto'
+import { spawnSync } from 'node:child_process'
 import { chmod, mkdtemp, readFile, readdir, realpath, rename, stat, writeFile } from 'node:fs/promises'
 import { copyDir, ensureDir, pathExists, readJson, removeIfExists, writeJsonAtomic } from './fs.js'
 import { discoverSkills } from './skillsDiscovery.js'
@@ -11,6 +12,7 @@ import { isSecretArgFlag, isSecretLikeKey } from './mcpSecrets.js'
 import type { McpServerDefinition, McpTransportType } from '../types.js'
 
 export const PLUGIN_SPEC_VERSION = '1.0.0'
+const EXPORT_INVENTORY = '.agents-export.json'
 export const PLUGIN_MANIFEST_SCHEMA = `https://agent-plugins.org/schemas/${PLUGIN_SPEC_VERSION}/plugin.schema.json`
 export const PLUGIN_MCP_SCHEMA = `https://agent-plugins.org/schemas/${PLUGIN_SPEC_VERSION}/mcp.schema.json`
 
@@ -261,6 +263,9 @@ export async function exportPlugin(options: ExportPluginOptions): Promise<Export
   // Imported servers retain their package-relative paths when bundled again.
   // Ship only referenced snapshots, never the writable plugin-data directory.
   const runtimeOut = path.join(outDir, '.agents/plugins')
+  if (!containsPath(realOutput, await resolveProspectivePath(runtimeOut))) {
+    throw new Error('Plugin runtime output must stay inside the output directory.')
+  }
   await removeIfExists(runtimeOut)
   const runtimeNames = new Set([...JSON.stringify(file).matchAll(/(?:\$\{PLUGIN_ROOT\}|\.)\/\.agents\/plugins\/([A-Za-z0-9_.-]+)/g)].map(match => match[1]))
   for (const name of runtimeNames) {
@@ -277,6 +282,7 @@ export async function exportPlugin(options: ExportPluginOptions): Promise<Export
   for (const skill of discovery.skills) {
     await copyContainedPluginAssets(skill.sourcePath, path.join(skillsOut, skill.name), paths.agentsSkillsDir)
   }
+  await writeExportInventory(outDir)
 
   return {
     outDir,
@@ -305,13 +311,23 @@ function containsPath(parent: string, child: string): boolean {
 }
 
 /** Materialize contained assets, retaining executable permissions and rejecting cycles. */
-async function copyContainedPluginAssets(sourceRoot: string, destinationRoot: string, boundaryRoot = sourceRoot, hash?: ReturnType<typeof createHash>): Promise<void> {
+async function copyContainedPluginAssets(sourceRoot: string, destinationRoot: string, boundaryRoot = sourceRoot, hash?: ReturnType<typeof createHash>, ignored = new Set<string>(), allowed?: Set<string>): Promise<void> {
   const boundary = await realpath(boundaryRoot)
+  const isIgnored = (file: string): boolean => {
+    for (let current = file; containsPath(boundary, current); current = path.dirname(current)) {
+      if (ignored.has(current)) return true
+      if (current === boundary) break
+    }
+    return false
+  }
   const copy = async (source: string, relative: string, ancestors: Set<string>): Promise<void> => {
+    if (isIgnored(source)) return
     const resolved = await realpath(source)
+    if (isIgnored(resolved)) return
     if (!containsPath(boundary, resolved)) {
       throw new Error(`Plugin asset "${relative}" links outside the plugin directory.`)
     }
+    if (allowed && !allowed.has(source)) return
     const info = await stat(resolved)
     const destination = path.join(destinationRoot, relative)
     if (info.isDirectory()) {
@@ -337,9 +353,78 @@ async function copyContainedPluginAssets(sourceRoot: string, destinationRoot: st
   await copy(sourceRoot, '', new Set())
 }
 
+/** Record exactly the files produced by export, even when its output is gitignored. */
+async function writeExportInventory(outDir: string): Promise<void> {
+  const files: Record<string, string> = {}
+  const directories: string[] = []
+  const visit = async (relative: string): Promise<void> => {
+    const absolute = path.join(outDir, relative)
+    if (!(await pathExists(absolute))) return
+    if ((await stat(absolute)).isDirectory()) {
+      directories.push(relative)
+      for (const entry of (await readdir(absolute)).sort()) await visit(path.posix.join(relative, entry))
+    } else {
+      files[relative] = createHash('sha256').update(await readFile(absolute)).digest('hex')
+    }
+  }
+  for (const relative of ['plugin.json', 'mcp.json', 'skills', '.agents/plugins']) await visit(relative)
+  await writeJsonAtomic(path.join(outDir, EXPORT_INVENTORY), { version: 1, files, directories })
+}
+
+/** Trust an export inventory only for contained files whose contents still match it. */
+async function exportedPluginAssets(sourceRoot: string): Promise<Set<string> | undefined> {
+  const inventoryPath = path.join(sourceRoot, EXPORT_INVENTORY)
+  if (!(await pathExists(inventoryPath))) return undefined
+  const inventory = await readJson<{ version?: unknown; files?: unknown; directories?: unknown }>(inventoryPath)
+  const directories = inventory.directories ?? []
+  if (inventory.version !== 1 || !isStringRecord(inventory.files)
+    || !Array.isArray(directories) || !directories.every((entry): entry is string => typeof entry === 'string')
+    || !Object.hasOwn(inventory.files, 'plugin.json') || !Object.hasOwn(inventory.files, 'mcp.json')) {
+    throw new Error('Invalid plugin export inventory; export the package again.')
+  }
+  const allowed = new Set([sourceRoot, inventoryPath])
+  for (const relative of [...Object.keys(inventory.files), ...directories]) {
+    if (!relative || relative.includes('\\') || path.posix.isAbsolute(relative)
+      || path.posix.normalize(relative) !== relative || relative === '..' || relative.startsWith('../')) {
+      throw new Error('Plugin export inventory contains an unsafe path.')
+    }
+    const file = path.join(sourceRoot, relative)
+    const digest = inventory.files[relative]
+    const info = await stat(file)
+    const matches = digest === undefined ? info.isDirectory()
+      : info.isFile() && createHash('sha256').update(await readFile(file)).digest('hex') === digest
+    if (!containsPath(sourceRoot, await realpath(file)) || !matches) {
+      throw new Error(`Exported plugin asset "${relative}" changed; export the package again.`)
+    }
+    for (let current = file; current !== sourceRoot; current = path.dirname(current)) allowed.add(current)
+  }
+  return allowed
+}
+
+/** Honor Git's inherited, repository-local and global ignore rules for local assets. */
+async function ignoredPluginAssets(sourceRoot: string): Promise<Set<string>> {
+  let ancestor = sourceRoot
+  while (!(await pathExists(path.join(ancestor, '.git')))) {
+    const parent = path.dirname(ancestor)
+    if (parent === ancestor) return new Set()
+    ancestor = parent
+  }
+  const result = spawnSync('git', ['-C', ancestor, 'ls-files', '--others', '--ignored', '--exclude-standard', '--directory', '-z', '--', path.relative(ancestor, sourceRoot) || '.'], {
+    encoding: 'utf8', timeout: 10_000, maxBuffer: 16 * 1024 * 1024
+  })
+  if (result.status !== 0) throw new Error('Cannot read Git ignore rules for this plugin; refusing to copy potentially private files.')
+  const ignored = result.stdout.split('\0').filter(Boolean).map(file => path.resolve(ancestor, file))
+  if (ignored.some(file => containsPath(file, sourceRoot))) {
+    throw new Error('Plugin source is ignored by Git. Import a package produced by agents plugin export, or move the package outside the ignored directory.')
+  }
+  return new Set(ignored)
+}
+
 /** Install a self-contained snapshot without following links outside the package. */
 async function installPluginSnapshot(pluginDir: string, pluginsDir: string, name: string): Promise<string> {
   const sourceRoot = await realpath(pluginDir)
+  const allowed = await exportedPluginAssets(sourceRoot)
+  const ignored = allowed ? new Set<string>() : await ignoredPluginAssets(sourceRoot)
   const installRoot = await resolveProspectivePath(pluginsDir)
   if (containsPath(sourceRoot, installRoot)) {
     throw new Error('Plugin source must not contain its .agents/plugins installation directory.')
@@ -349,7 +434,7 @@ async function installPluginSnapshot(pluginDir: string, pluginsDir: string, name
   const hash = createHash('sha256')
 
   try {
-    await copyContainedPluginAssets(sourceRoot, staging, sourceRoot, hash)
+    await copyContainedPluginAssets(sourceRoot, staging, sourceRoot, hash, ignored, allowed)
     const installed = path.join(installRoot, `${name}-${hash.digest('hex')}`)
     if (!(await pathExists(installed))) await rename(staging, installed)
     return path.join(path.resolve(pluginsDir), path.basename(installed))
@@ -364,7 +449,7 @@ function isStringArray(value: unknown): boolean {
 }
 
 /** Whether a value is an object whose values are all strings. */
-function isStringRecord(value: unknown): boolean {
+function isStringRecord(value: unknown): value is Record<string, string> {
   return (
     typeof value === 'object'
     && value !== null

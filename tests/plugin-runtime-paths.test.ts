@@ -1,7 +1,7 @@
 import os from 'node:os'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
-import { chmod, mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { afterEach, expect, it, vi } from 'vitest'
 import { createDefaultAgentsConfig, saveAgentsConfig } from '../src/core/config.js'
 import { exportPlugin, importPlugin, PLUGIN_MANIFEST_SCHEMA, PLUGIN_MCP_SCHEMA, type PluginMcpServer } from '../src/core/agentPlugin.js'
@@ -113,6 +113,79 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
   const result = await probeServerTools(server, 2000)
   expect(result.ok, result.error).toBe(true)
   expect(result.tools.map(tool => tool.name)).toEqual(['ok'])
+})
+
+it('excludes secrets ignored by parent Git rules or local excludes from snapshots', async () => {
+  const { root, pluginDir, projectRoot } = await fixture({ type: 'stdio', command: 'node' })
+  expect(spawnSync('git', ['init', '-q', root]).status).toBe(0)
+  await writeFile(path.join(root, '.gitignore'), '.env\nprivate/\n')
+  await writeFile(path.join(root, '.git/info/exclude'), 'local-token.txt\n')
+  await writeFile(path.join(pluginDir, '.env'), 'TOKEN=fixture-secret')
+  await writeFile(path.join(pluginDir, 'local-token.txt'), 'local-secret')
+  await mkdir(path.join(pluginDir, 'private'))
+  await writeFile(path.join(pluginDir, 'private/secret.txt'), 'nested-secret')
+  await symlink('.env', path.join(pluginDir, 'alias.txt'))
+  await writeFile(path.join(pluginDir, 'public.txt'), 'public asset')
+  await importPlugin({ projectRoot, pluginDir })
+  const server = (await loadResolvedRegistry(projectRoot)).serversByTarget.codex[0]
+  const installed = server.env!.PLUGIN_ROOT
+  for (const name of ['.env', 'local-token.txt', 'private/secret.txt', 'alias.txt']) {
+    expect(await pathExists(path.join(installed, name)), name).toBe(false)
+  }
+  expect(await readFile(path.join(installed, 'public.txt'), 'utf8')).toBe('public asset')
+})
+
+it('imports exported bundles from ignored dist directories without copying later local files', async () => {
+  const { root, projectRoot, pluginDir } = await fixture({ type: 'stdio', command: 'node', args: ['-e', 'console.log("ok")'] })
+  await importPlugin({ projectRoot, pluginDir })
+  expect(spawnSync('git', ['init', '-q', projectRoot]).status).toBe(0)
+  await writeFile(path.join(projectRoot, '.gitignore'), 'dist/\n.env\n')
+  const outDir = path.join(projectRoot, 'dist/agent-plugin')
+  await exportPlugin({ projectRoot, outDir, name: 'bundle' })
+  await writeFile(path.join(outDir, '.env'), 'TOKEN=private-fixture')
+  const consumer = path.join(root, 'consumer')
+  await saveAgentsConfig(consumer, createDefaultAgentsConfig({ enabledIntegrations: ['codex'], mcpServers: {} }))
+  await importPlugin({ projectRoot: consumer, pluginDir: outDir })
+  const server = (await loadResolvedRegistry(consumer)).serversByTarget.codex[0]
+  const result = spawnSync(server.command!, server.args, { cwd: server.cwd, encoding: 'utf8' })
+  expect(result.status).toBe(0)
+  expect(result.stdout.trim()).toBe('ok')
+  const snapshots = path.join(consumer, '.agents/plugins')
+  const entries = await readdir(snapshots)
+  expect(await pathExists(path.join(snapshots, entries[0], '.env'))).toBe(false)
+})
+
+it('retains empty runtime working directories through export inventories', async () => {
+  const { root, projectRoot, pluginDir } = await fixture({ type: 'stdio', command: 'node', args: ['-e', 'console.log("ok")'], cwd: './work' })
+  await mkdir(path.join(pluginDir, 'work'))
+  await importPlugin({ projectRoot, pluginDir })
+  const outDir = path.join(root, 'bundle')
+  await exportPlugin({ projectRoot, outDir, name: 'bundle' })
+  const consumer = path.join(root, 'consumer')
+  await saveAgentsConfig(consumer, createDefaultAgentsConfig({ enabledIntegrations: ['codex'], mcpServers: {} }))
+  await importPlugin({ projectRoot: consumer, pluginDir: outDir })
+  const server = (await loadResolvedRegistry(consumer)).serversByTarget.codex[0]
+  expect(spawnSync(server.command!, server.args, { cwd: server.cwd, encoding: 'utf8' }).status).toBe(0)
+})
+
+it.each(['changed', 'traversal'] as const)('rejects unsafe export inventories (%s)', async mode => {
+  const { root, projectRoot, pluginDir } = await fixture({ type: 'stdio', command: 'node' })
+  await importPlugin({ projectRoot, pluginDir })
+  const outDir = path.join(root, 'bundle')
+  await exportPlugin({ projectRoot, outDir, name: 'bundle' })
+  if (mode === 'changed') {
+    const manifest = JSON.parse(await readFile(path.join(outDir, 'plugin.json'), 'utf8'))
+    manifest.description = 'changed after export'
+    await writeFile(path.join(outDir, 'plugin.json'), JSON.stringify(manifest))
+  } else {
+    const inventoryPath = path.join(outDir, '.agents-export.json')
+    const inventory = JSON.parse(await readFile(inventoryPath, 'utf8'))
+    inventory.files['../private.txt'] = 'fake-digest'
+    await writeFile(inventoryPath, JSON.stringify(inventory))
+  }
+  const consumer = path.join(root, 'consumer')
+  await saveAgentsConfig(consumer, createDefaultAgentsConfig({ mcpServers: {} }))
+  await expect(importPlugin({ projectRoot: consumer, pluginDir: outDir })).rejects.toThrow(/changed|unsafe path/)
 })
 
 it.each(['command', 'cwd'] as const)('rejects %s paths escaping the installed package', async field => {

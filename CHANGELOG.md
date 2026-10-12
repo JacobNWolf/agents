@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Plugin snapshots exclude local files ignored by Git, including inherited rules, local excludes and links to ignored credentials. Export inventories keep bundles in ignored output directories importable without copying later local files.
+
 - Re-exported plugins include their imported runtime snapshots and retain package root variables, while writable plugin data stays private and is recreated on import or sync.
 
 - MCP add and import preserve reference-only authorization headers such as `Bearer ${TOKEN}` while keeping literal credentials and fallbacks local.

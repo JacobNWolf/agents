@@ -285,6 +285,8 @@ describe('agent plugin import', () => {
     const source = await makeProject()
     const pluginDir = path.join(source, 'dist/plugin')
     await exportPlugin({ projectRoot: source, outDir: pluginDir, name: 'runtime' })
+    // This fixture adds a hand-authored runtime after export.
+    await rm(path.join(pluginDir, '.agents-export.json'))
     await mkdir(path.join(pluginDir, 'scripts'), { recursive: true })
     await mkdir(path.join(pluginDir, 'data'), { recursive: true })
     await writeFile(path.join(pluginDir, 'data/value.txt'), 'bundled resource')
