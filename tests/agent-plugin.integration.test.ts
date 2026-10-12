@@ -435,6 +435,22 @@ describe('plugin export safety', () => {
 })
 
 describe('plugin secret handling', () => {
+  it.each(['fixture-token', '${TOKEN:-fixture-token}', '${TOKEN}extra'])('refuses a literal credential in token args: %s', async value => {
+    const projectRoot = await makeProject()
+    const config = await loadAgentsConfig(projectRoot)
+    config.mcp.servers = { svc: { transport: 'stdio', command: 'node', args: ['server.js', '--token', value] } }
+    await saveAgentsConfig(projectRoot, config)
+    const outDir = path.join(projectRoot, 'bundle')
+    await expect(exportPlugin({ projectRoot, outDir, name: 'test' })).rejects.toThrow(/literal values/)
+    expect(await pathExists(outDir)).toBe(false)
+    await expect(exportPlugin({ projectRoot, outDir, name: 'test', allowLiteralSecrets: true })).resolves.toBeDefined()
+  })
+
+  it('allows placeholder token arguments but rejects inline literal token flags', () => {
+    expect(buildPluginMcp({ svc: { transport: 'stdio', command: 'node', args: ['--token', '${TOKEN}'] } }).literalSecrets).toEqual([])
+    expect(buildPluginMcp({ svc: { transport: 'stdio', command: 'node', args: ['--token=fixture-token'] } }).literalSecrets).toEqual(['svc.args.0'])
+  })
+
   it('refuses a placeholder whose fallback is a literal credential', () => {
     const { literalSecrets } = buildPluginMcp({
       api: {

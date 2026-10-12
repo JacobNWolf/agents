@@ -6,7 +6,7 @@ import { discoverSkills } from './skillsDiscovery.js'
 import { getProjectPaths } from './paths.js'
 import { loadAgentsConfig, updateAgentsConfig } from './config.js'
 import { validateServerName } from './mcpValidation.js'
-import { isSecretLikeKey } from './mcpSecrets.js'
+import { isSecretArgFlag, isSecretLikeKey } from './mcpSecrets.js'
 import type { McpServerDefinition, McpTransportType } from '../types.js'
 
 export const PLUGIN_SPEC_VERSION = '1.0.0'
@@ -114,8 +114,8 @@ export function buildPluginMcp(servers: Record<string, McpServerDefinition>): {
    * Only a bare `${VAR}` reference is safe. `${VAR:-sk-live-...}` is not: the fallback
    * is a literal and travels with the package, and neither is `Bearer abc123`.
    */
-  const checkLiteralSecret = (serverName: string, field: string, key: string, value: string): void => {
-    if (!isSecretLikeKey(key)) return
+  const checkLiteralSecret = (serverName: string, field: string, key: string, value: string, credential = isSecretLikeKey(key)): void => {
+    if (!credential) return
     const withoutRefs = value.replace(/\$\{[A-Z0-9_]+\}/g, '')
     const hasReference = withoutRefs !== value
     const hasFallback = /\$\{[A-Z0-9_]+:-/.test(value)
@@ -136,6 +136,13 @@ export function buildPluginMcp(servers: Record<string, McpServerDefinition>): {
       }
       const command = normalize(server.command)
       const args = (server.args ?? []).map(normalize)
+      for (const [index, arg] of args.entries()) {
+        const inline = arg.match(/^(--?[^=]+)=(.*)$/s)
+        const value = index > 0 && isSecretArgFlag(args[index - 1]) && !arg.startsWith('-')
+          ? arg
+          : inline && isSecretArgFlag(inline[1]) ? inline[2] : undefined
+        if (value !== undefined) checkLiteralSecret(name, 'args', String(index), value, true)
+      }
       const env = server.env
         ? Object.fromEntries(
             Object.entries(server.env).map(([key, value]) => {

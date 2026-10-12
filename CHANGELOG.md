@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Plugin export rejects literal credentials in separate and inline token arguments unless explicitly allowed, including unsafe placeholder fallbacks.
+
 - Forced template initialization replaces destination symlinks atomically instead of overwriting their external targets.
 
 - Antigravity rejects skill roots and grouping directories that resolve outside the project before dereferencing their contents.
