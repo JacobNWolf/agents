@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Re-exported plugins include their imported runtime snapshots and retain package root variables, while writable plugin data stays private and is recreated on import or sync.
+
 - MCP add and import preserve reference-only authorization headers such as `Bearer ${TOKEN}` while keeping literal credentials and fallbacks local.
 
 - Automatic update checks start after the command finishes, so optional metadata writes cannot lock out MCP edits or sync.

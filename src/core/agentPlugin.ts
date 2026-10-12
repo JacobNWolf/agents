@@ -101,7 +101,9 @@ export function buildPluginMcp(servers: Record<string, McpServerDefinition>): {
 
   /** Rewrite the project placeholder and record every other variable the value needs. */
   const normalize = (value: string): string => {
-    const rewritten = value.replaceAll('${PROJECT_ROOT}', '${PLUGIN_ROOT}')
+    const rewritten = value
+      .replaceAll('${PROJECT_ROOT}/.agents/plugin-data/', '${PLUGIN_DATA}/')
+      .replaceAll('${PROJECT_ROOT}', '${PLUGIN_ROOT}')
     for (const match of rewritten.matchAll(/\$\{([A-Z0-9_]+)(?::-[^}]*)?\}/g)) {
       const key = match[1]
       if (key && !clientPlaceholders.has(key)) requiredEnv.add(key)
@@ -135,7 +137,7 @@ export function buildPluginMcp(servers: Record<string, McpServerDefinition>): {
         warnings.push(`Server "${name}" has no command; skipped in the plugin.`)
         continue
       }
-      const command = normalize(server.command)
+      const command = normalize(server.command).replace(/^\$\{PLUGIN_ROOT\}\//, './')
       const args = (server.args ?? []).map(normalize)
       for (const [index, arg] of args.entries()) {
         const inline = arg.match(/^(--?[^=]+)=(.*)$/s)
@@ -255,6 +257,16 @@ export async function exportPlugin(options: ExportPluginOptions): Promise<Export
   await ensureDir(outDir)
   await writeJsonAtomic(path.join(outDir, 'plugin.json'), manifest)
   await writeJsonAtomic(path.join(outDir, 'mcp.json'), file)
+
+  // Imported servers retain their package-relative paths when bundled again.
+  // Ship only referenced snapshots, never the writable plugin-data directory.
+  const runtimeOut = path.join(outDir, '.agents/plugins')
+  await removeIfExists(runtimeOut)
+  const runtimeNames = new Set([...JSON.stringify(file).matchAll(/(?:\$\{PLUGIN_ROOT\}|\.)\/\.agents\/plugins\/([A-Za-z0-9_.-]+)/g)].map(match => match[1]))
+  for (const name of runtimeNames) {
+    if (name === '.' || name === '..') throw new Error('Plugin runtime path must stay inside .agents/plugins.')
+    await copyContainedPluginAssets(path.join(paths.agentsDir, 'plugins', name), path.join(runtimeOut, name))
+  }
 
   // Always replace the previous skills directory: a re-export of a project that lost a
   // skill must not keep shipping it.
@@ -583,6 +595,13 @@ export async function importPlugin(args: {
           const suffix = path.relative(base, resolved).split(path.sep).join('/')
           return suffix ? `${portableBase}/${suffix}` : portableBase
         }
+        const runtimeRoot = server.env?.PLUGIN_ROOT?.startsWith('${PLUGIN_ROOT}/')
+          ? toPluginPath(server.env.PLUGIN_ROOT) : pluginRoot
+        const runtimeData = server.env?.PLUGIN_DATA?.startsWith('${PLUGIN_DATA}/')
+          ? toPluginPath(server.env.PLUGIN_DATA) : pluginData
+        if (server.type === 'stdio') {
+          await ensureDir(runtimeData.replace('${PROJECT_ROOT}', path.resolve(args.projectRoot)))
+        }
         config.mcp.servers[targetName] = server.type === 'stdio'
           ? {
               transport: 'stdio',
@@ -590,8 +609,8 @@ export async function importPlugin(args: {
               ...(server.args ? { args: server.args.map(toProjectPlaceholder) } : {}),
               env: {
                 ...Object.fromEntries(Object.entries(server.env ?? {}).map(([k, v]) => [k, toProjectPlaceholder(v)])),
-                PLUGIN_ROOT: pluginRoot,
-                PLUGIN_DATA: pluginData
+                PLUGIN_ROOT: runtimeRoot,
+                PLUGIN_DATA: runtimeData
               },
               cwd: toPluginPath(server.cwd ?? '${PLUGIN_ROOT}')
             }

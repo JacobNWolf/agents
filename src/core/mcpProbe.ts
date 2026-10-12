@@ -1,6 +1,5 @@
 import { spawn } from 'node:child_process'
-import path from 'node:path'
-import { syncPluginData } from './pluginRuntime.js'
+import { pluginProjectRoot, syncPluginData } from './pluginRuntime.js'
 import { CLI_VERSION } from './version.js'
 import type { ResolvedMcpServer } from '../types.js'
 
@@ -855,9 +854,10 @@ export async function probeServerTools(server: ResolvedMcpServer, timeoutMs = 15
     }
   }
 
-  if (server.transport === 'stdio' && server.env?.PLUGIN_ROOT && path.isAbsolute(server.env.PLUGIN_ROOT)) {
+  const projectRoot = pluginProjectRoot(server)
+  if (server.transport === 'stdio' && projectRoot) {
     try {
-      await syncPluginData(path.resolve(server.env.PLUGIN_ROOT, '../../..'), [server], false, [])
+      await syncPluginData(projectRoot, [server], false, [])
     } catch (error) {
       return { server: server.name, ok: false, tools: [], characters: 0, error: error instanceof Error ? error.message : String(error) }
     }

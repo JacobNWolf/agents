@@ -448,7 +448,7 @@ describe('plugin export safety', () => {
       }
     })
 
-    expect(file.mcpServers.local?.command).toBe('${PLUGIN_ROOT}/bin/server')
+    expect(file.mcpServers.local?.command).toBe('./bin/server')
     expect(requiredEnv).toContain('WORKSPACE_DIR')
   })
 

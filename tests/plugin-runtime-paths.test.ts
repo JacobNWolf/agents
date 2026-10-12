@@ -4,10 +4,11 @@ import { spawnSync } from 'node:child_process'
 import { chmod, mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { afterEach, expect, it, vi } from 'vitest'
 import { createDefaultAgentsConfig, saveAgentsConfig } from '../src/core/config.js'
-import { importPlugin, PLUGIN_MANIFEST_SCHEMA, PLUGIN_MCP_SCHEMA, type PluginMcpServer } from '../src/core/agentPlugin.js'
+import { exportPlugin, importPlugin, PLUGIN_MANIFEST_SCHEMA, PLUGIN_MCP_SCHEMA, type PluginMcpServer } from '../src/core/agentPlugin.js'
 import { loadResolvedRegistry } from '../src/core/mcp.js'
 import { performSync } from '../src/core/sync.js'
 import { pathExists } from '../src/core/fs.js'
+import { probeServerTools } from '../src/core/mcpProbe.js'
 
 const roots: string[] = []
 afterEach(async () => {
@@ -43,6 +44,35 @@ it('resolves relative cwd against the installed package and survives relocation'
   expect(result.stdout).toContain('relative cwd works')
 })
 
+it.each([false, true])('re-exports imported runtimes without their private data (assets=%s)', async assets => {
+  const { root, pluginDir, projectRoot } = await fixture({
+    type: 'stdio', command: 'node',
+    args: assets ? ['${PLUGIN_ROOT}/server.cjs'] : ['-e', 'console.log("ok")'],
+    cwd: '${PLUGIN_DATA}'
+  })
+  await writeFile(path.join(pluginDir, 'server.cjs'), 'const fs = require("node:fs"); console.log(fs.readFileSync(process.env.PLUGIN_ROOT + "/asset.txt", "utf8")); fs.writeFileSync(process.env.PLUGIN_DATA + "/created.txt", "ok")')
+  await writeFile(path.join(pluginDir, 'asset.txt'), 'ok')
+  await importPlugin({ projectRoot, pluginDir })
+  const original = (await loadResolvedRegistry(projectRoot)).serversByTarget.codex[0]
+  await writeFile(path.join(original.env!.PLUGIN_DATA, 'private.txt'), 'private fixture')
+  const bundle = path.join(root, 'bundle')
+  await exportPlugin({ projectRoot, outDir: bundle, name: 'bundle' })
+  await rm(projectRoot, { recursive: true })
+  await rm(pluginDir, { recursive: true })
+  const consumer = path.join(root, 'consumer')
+  await saveAgentsConfig(consumer, createDefaultAgentsConfig({ enabledIntegrations: ['codex'], mcpServers: {} }))
+  await importPlugin({ projectRoot: consumer, pluginDir: bundle })
+  const server = (await loadResolvedRegistry(consumer)).serversByTarget.codex[0]
+  const run = () => spawnSync(server.command!, server.args, { cwd: server.cwd, env: { ...process.env, ...server.env }, encoding: 'utf8' })
+  expect(run().status).toBe(0)
+  expect(run().stdout.trim()).toBe('ok')
+  expect(await pathExists(path.join(server.env!.PLUGIN_DATA, 'private.txt'))).toBe(false)
+  await rm(path.join(consumer, '.agents/plugin-data'), { recursive: true })
+  vi.stubEnv('PATH', '')
+  await performSync({ projectRoot: consumer, check: false, verbose: false })
+  expect(await pathExists(server.cwd!)).toBe(true)
+})
+
 it('resolves a relative command independently of a different cwd', async () => {
   const { pluginDir, projectRoot } = await fixture({ type: 'stdio', command: './bin/server', cwd: '${PLUGIN_ROOT}/work' })
   await mkdir(path.join(pluginDir, 'bin'))
@@ -56,6 +86,33 @@ it('resolves a relative command independently of a different cwd', async () => {
   expect(result.error).toBeUndefined()
   expect(result.status).toBe(0)
   expect(result.stdout).toContain('relative command works')
+})
+
+it('re-exports executable commands and recreates nested runtime data before probing', async () => {
+  const { root, pluginDir, projectRoot } = await fixture({ type: 'stdio', command: './server', cwd: '${PLUGIN_DATA}' })
+  await writeFile(path.join(pluginDir, 'server'), `#!${process.execPath}
+const readline = require('node:readline')
+readline.createInterface({ input: process.stdin }).on('line', line => {
+  const message = JSON.parse(line)
+  if (message.id === undefined) return
+  const result = message.method === 'server/discover'
+    ? { resultType: 'complete', supportedVersions: ['2026-07-28'], capabilities: { tools: {} } }
+    : { resultType: 'complete', tools: [{ name: 'ok', inputSchema: { type: 'object' } }] }
+  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, result }) + '\\n')
+})
+`)
+  await chmod(path.join(pluginDir, 'server'), 0o755)
+  await importPlugin({ projectRoot, pluginDir })
+  const outDir = path.join(root, 'executable-bundle')
+  await exportPlugin({ projectRoot, outDir, name: 'bundle' })
+  const consumer = path.join(root, 'consumer')
+  await saveAgentsConfig(consumer, createDefaultAgentsConfig({ enabledIntegrations: ['codex'], mcpServers: {} }))
+  await importPlugin({ projectRoot: consumer, pluginDir: outDir })
+  const server = (await loadResolvedRegistry(consumer)).serversByTarget.codex[0]
+  await rm(path.join(consumer, '.agents/plugin-data'), { recursive: true })
+  const result = await probeServerTools(server, 2000)
+  expect(result.ok, result.error).toBe(true)
+  expect(result.tools.map(tool => tool.name)).toEqual(['ok'])
 })
 
 it.each(['command', 'cwd'] as const)('rejects %s paths escaping the installed package', async field => {
