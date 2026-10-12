@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Update checks lock local.json metadata writes and defer them while configuration changes are in progress, preventing lost MCP secrets.
+
 - MCP add automatically moves secret-looking env and header values into local.json, matching import and the documented security behavior.
 
 - Reset preserves manual servers in project MCP files absent from an existing applied ownership record, including after disconnect.
