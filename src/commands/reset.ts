@@ -1,6 +1,6 @@
 import path from 'node:path'
 import { lstat, readlink, readdir, rmdir } from 'node:fs/promises'
-import { applyEdits as applyJsoncEdits, modify as modifyJsonc, parse as parseJsonc } from 'jsonc-parser'
+import { applyEdits as applyJsoncEdits, createScanner, modify as modifyJsonc, parse as parseJsonc, SyntaxKind } from 'jsonc-parser'
 import { cleanupManagedGitignore } from '../core/gitignore.js'
 import { readGooseDocument, readGooseExtensions, setGooseExtensions, writeGooseConfig } from '../core/goose.js'
 import { getProjectPaths } from '../core/paths.js'
@@ -511,6 +511,7 @@ async function cleanupKeyedJsonConfig(
     : await readConfigObjectForCleanup(args.configPath, label, args.warnings)
   if (existing === null) return
   if (Object.keys(existing).length === 0) {
+    if (options?.jsonc && hasJsoncComments(await readTextOrEmpty(args.configPath))) return
     await removeResetTarget(args.configPath, args.projectRoot, args.removed)
     return
   }
@@ -536,18 +537,31 @@ async function persistCleanedJsoncConfig(
   key: string,
 ): Promise<void> {
   if (JSON.stringify(cleaned) === JSON.stringify(existing)) return
-  if (Object.keys(cleaned).length === 0) {
+  const raw = await readTextOrEmpty(args.configPath)
+  if (Object.keys(cleaned).length === 0 && !hasJsoncComments(raw)) {
     await removeResetTarget(args.configPath, args.projectRoot, args.removed)
     return
   }
 
-  const raw = await readTextOrEmpty(args.configPath)
-  const edits = modifyJsonc(raw, [key], cleaned[key], {
+  // Deleting a property can consume the leading comments attached to it. An empty
+  // server map keeps those comments without leaving any managed entries active.
+  const value = cleaned[key] === undefined && hasJsoncComments(raw) ? {} : cleaned[key]
+  const edits = modifyJsonc(raw, [key], value, {
     formattingOptions: { insertSpaces: true, tabSize: 2 }
   })
   const applied = applyJsoncEdits(raw, edits)
+  if (applied === raw) return
   await writeTextAtomic(args.configPath, applied.endsWith('\n') ? applied : `${applied}\n`)
   args.removed.push(path.relative(args.projectRoot, args.configPath) || args.configPath)
+}
+
+/** Comments remain user content even when a JSONC object has no active settings. */
+function hasJsoncComments(raw: string): boolean {
+  const scanner = createScanner(raw)
+  for (let token = scanner.scan(); token !== SyntaxKind.EOF; token = scanner.scan()) {
+    if (token === SyntaxKind.LineCommentTrivia || token === SyntaxKind.BlockCommentTrivia) return true
+  }
+  return false
 }
 
 /** Read a JSONC settings file for cleanup, tolerating comments and trailing commas. */
