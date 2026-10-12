@@ -5,6 +5,7 @@ import { copyDir, ensureDir, pathExists, readJson, removeIfExists, writeJsonAtom
 import { discoverSkills } from './skillsDiscovery.js'
 import { getProjectPaths } from './paths.js'
 import { loadAgentsConfig, updateAgentsConfig } from './config.js'
+import { ensureProjectGitignore } from './gitignore.js'
 import { validateServerName } from './mcpValidation.js'
 import { isSecretArgFlag, isSecretLikeKey } from './mcpSecrets.js'
 import type { McpServerDefinition, McpTransportType } from '../types.js'
@@ -553,27 +554,40 @@ export async function importPlugin(args: {
         const installed = await install()
         const relativeRoot = path.relative(args.projectRoot, installed).split(path.sep).join('/')
         const pluginRoot = '${PROJECT_ROOT}/' + relativeRoot
+        const dataName = `${manifest.name}-${createHash('sha256').update(prefix).digest('hex').slice(0, 12)}`
+        const dataDir = path.join(paths.agentsPluginDataDir, dataName)
+        const pluginData = '${PROJECT_ROOT}/' + path.relative(args.projectRoot, dataDir).split(path.sep).join('/')
+        if (server.type === 'stdio') {
+          await ensureDir(dataDir)
+          await ensureProjectGitignore(args.projectRoot, config.syncMode)
+        }
         // Keep the package root portable and separate from the consuming project root.
-        const toProjectPlaceholder = (value: string): string => value.replaceAll('${PLUGIN_ROOT}', pluginRoot)
+        const toProjectPlaceholder = (value: string): string => value
+          .replaceAll('${PLUGIN_ROOT}', pluginRoot).replaceAll('${PLUGIN_DATA}', pluginData)
         const toPluginPath = (value: string): string => {
-          const rootPrefix = '${PLUGIN_ROOT}'
+          const dataPath = value === '${PLUGIN_DATA}' || value.startsWith('${PLUGIN_DATA}/')
+          const rootPrefix = dataPath ? '${PLUGIN_DATA}' : '${PLUGIN_ROOT}'
+          const base = dataPath ? dataDir : installed
+          const portableBase = dataPath ? pluginData : pluginRoot
           const relative = value.startsWith('./') ? value
             : value === rootPrefix || value.startsWith(`${rootPrefix}/`) ? `.${value.slice(rootPrefix.length)}`
               : undefined
           if (relative === undefined) return toProjectPlaceholder(value)
-          const resolved = path.resolve(installed, relative)
-          if (!containsPath(installed, resolved)) throw new Error(`Plugin server "${name}" path "${value}" resolves outside the plugin directory.`)
-          const suffix = path.relative(installed, resolved).split(path.sep).join('/')
-          return suffix ? `${pluginRoot}/${suffix}` : pluginRoot
+          const resolved = path.resolve(base, relative)
+          if (!containsPath(base, resolved)) throw new Error(`Plugin server "${name}" path "${value}" resolves outside the ${dataPath ? 'plugin data' : 'plugin'} directory.`)
+          const suffix = path.relative(base, resolved).split(path.sep).join('/')
+          return suffix ? `${portableBase}/${suffix}` : portableBase
         }
         config.mcp.servers[targetName] = server.type === 'stdio'
           ? {
               transport: 'stdio',
               command: toPluginPath(server.command ?? ''),
               ...(server.args ? { args: server.args.map(toProjectPlaceholder) } : {}),
-              ...(server.env
-                ? { env: Object.fromEntries(Object.entries(server.env).map(([k, v]) => [k, toProjectPlaceholder(v)])) }
-                : {}),
+              env: {
+                ...Object.fromEntries(Object.entries(server.env ?? {}).map(([k, v]) => [k, toProjectPlaceholder(v)])),
+                PLUGIN_ROOT: pluginRoot,
+                PLUGIN_DATA: pluginData
+              },
               cwd: toPluginPath(server.cwd ?? '${PLUGIN_ROOT}')
             }
           : {

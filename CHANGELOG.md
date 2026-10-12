@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Imported plugin servers receive PLUGIN_ROOT and PLUGIN_DATA, with portable, gitignored data storage retained across package updates and recreated by sync or budget after cloning.
+
 - Imported plugin command and cwd paths resolve independently against the installed snapshot, remain portable and reject paths escaping its root.
 
 - Claude local-scope CLI read and write failures fail sync, retain failed-removal ownership and do not advance successful-sync state.

@@ -11,6 +11,7 @@ import { toManagedClaudeName } from '../integrations/claude.js'
 import { INTEGRATION_SYNC_HOOKS } from '../integrations/syncHooks.js'
 import { ensureProjectGitignore } from './gitignore.js'
 import { syncSkills } from './skills.js'
+import { syncPluginData } from './pluginRuntime.js'
 import { syncClaudeInstructions } from './claudeInstructions.js'
 import {
   getClaudeDesktopConfigPath,
@@ -113,6 +114,8 @@ export async function performSync(options: SyncOptions): Promise<SyncResult> {
     }
 
     const enabled = new Set(config.integrations.enabled)
+    await attempt('Plugin data', () => syncPluginData(projectRoot,
+      config.integrations.enabled.flatMap(id => resolved.serversByTarget[id]), check, changed))
     warnings.push(...collectUnsupportedFieldWarnings(resolved.serversByTarget, config.integrations.enabled))
 
     const previousGeneratedByIntegration: Partial<Record<IntegrationName, string>> = {}

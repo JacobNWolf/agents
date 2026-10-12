@@ -304,6 +304,11 @@ to that snapshot through a portable `${PROJECT_ROOT}` path. Commit the snapshot
 alongside `.agents/agents.json` so the imported servers also work in other clones.
 Links outside the package are rejected.
 
+Imported stdio servers receive `PLUGIN_ROOT` and `PLUGIN_DATA` in their environment.
+`${PLUGIN_DATA}` resolves to a writable directory under `.agents/plugin-data/`, which
+is gitignored and retained across package updates. Sync recreates missing data directories
+after a clone without changing them during `sync --check`.
+
 ## MCP Server Format
 
 **stdio transport:**

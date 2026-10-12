@@ -11,6 +11,7 @@ export interface ProjectPaths {
   rootClaudeMd: string
   agentsReadme: string
   agentsSkillsDir: string
+  agentsPluginDataDir: string
   generatedDir: string
   generatedCodex: string
   generatedGeminiState: string
@@ -232,6 +233,7 @@ export function getProjectPaths(projectRoot: string): ProjectPaths {
     rootClaudeMd: path.join(root, 'CLAUDE.md'),
     agentsReadme: path.join(agentsDir, 'README.md'),
     agentsSkillsDir: path.join(agentsDir, 'skills'),
+    agentsPluginDataDir: path.join(agentsDir, 'plugin-data'),
     generatedDir,
     generatedCodex: path.join(generatedDir, 'codex.config.toml'),
     generatedGeminiState: path.join(generatedDir, 'gemini.state.json'),
