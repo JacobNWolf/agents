@@ -129,13 +129,6 @@ export async function performSync(options: SyncOptions): Promise<SyncResult> {
       }
       previousGeneratedByIntegration[hook.id] = await readTextOrEmpty(hook.generatedPath(paths))
       generatedByIntegration[hook.id] = generated.content
-      await writeManagedFile({
-        absolutePath: hook.generatedPath(paths),
-        content: generated.content,
-        projectRoot,
-        check,
-        changed
-      })
     }
 
     const claudeDesktopGenerated = renderClaudeDesktopMcp(resolved.serversByTarget.claude_desktop, projectRoot)
@@ -151,6 +144,7 @@ export async function performSync(options: SyncOptions): Promise<SyncResult> {
       changed
     })
 
+    const failedIntegrations = new Set<IntegrationName>()
     for (const hook of INTEGRATION_SYNC_HOOKS) {
       if (!hook.materialize) continue
       const hookEnabled = enabled.has(hook.id)
@@ -172,8 +166,22 @@ export async function performSync(options: SyncOptions): Promise<SyncResult> {
         // One tool with a broken file used to abort the whole run, leaving the
         // integrations after it unwritten and the message with no name on it.
         const message = error instanceof Error ? error.message : String(error)
+        failedIntegrations.add(hook.id)
         errors.push(`${hook.id}: sync skipped after an error while writing its config. ${message}`)
       }
+    }
+
+    // Legacy previews establish ownership until adoption succeeds. A failed attempt
+    // must leave that evidence available to the next run.
+    for (const hook of INTEGRATION_SYNC_HOOKS) {
+      if (failedIntegrations.has(hook.id)) continue
+      await attempt(`${hook.id} preview`, () => writeManagedFile({
+        absolutePath: hook.generatedPath(paths),
+        content: generatedByIntegration[hook.id] ?? '',
+        projectRoot,
+        check,
+        changed
+      }))
     }
 
     const claudeScope = config.integrations.options.claudeScope

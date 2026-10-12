@@ -2,7 +2,8 @@ import os from 'node:os'
 import path from 'node:path'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createDefaultAgentsConfig } from '../src/core/config.js'
+import { createDefaultAgentsConfig, saveAgentsConfig } from '../src/core/config.js'
+import { performSync } from '../src/core/sync.js'
 import { getProjectPaths } from '../src/core/paths.js'
 import { INTEGRATION_SYNC_HOOKS } from '../src/integrations/syncHooks.js'
 import type { IntegrationName } from '../src/types.js'
@@ -22,6 +23,28 @@ afterEach(async () => {
 })
 
 describe('sync config ownership', () => {
+  it.each(cases)('retains legacy %s ownership evidence until a successful retry', async (id, pathKey, key) => {
+    const projectRoot = await mkdtemp(path.join(os.tmpdir(), 'agents-legacy-retry-'))
+    tempDirs.push(projectRoot)
+    vi.stubEnv('AGENTS_HOME_DIR', path.join(projectRoot, 'home'))
+    vi.stubEnv('PATH', '')
+    await saveAgentsConfig(projectRoot, createDefaultAgentsConfig({ enabledIntegrations: [id], mcpServers: {} }))
+    const paths = getProjectPaths(projectRoot)
+    const hook = INTEGRATION_SYNC_HOOKS.find(hook => hook.id === id)!
+    const preview = hook.generatedPath(paths)
+    const old = { command: 'old-managed' }
+    const previous = JSON.stringify({ [key]: { old } })
+    await mkdir(paths.generatedDir, { recursive: true })
+    await mkdir(path.dirname(paths[pathKey]), { recursive: true })
+    await writeFile(preview, previous)
+    await writeFile(paths[pathKey], '{ broken')
+    await expect(performSync({ projectRoot, check: false, verbose: false })).rejects.toThrow(/Sync incomplete/)
+    expect(await readFile(preview, 'utf8')).toBe(previous)
+    await writeFile(paths[pathKey], JSON.stringify({ [key]: { old, manual: { command: 'manual' } } }))
+    await performSync({ projectRoot, check: false, verbose: false })
+    expect(JSON.parse(await readFile(paths[pathKey], 'utf8'))[key]).toEqual({ manual: { command: 'manual' } })
+  })
+
   it.each(cases)('preserves manual entries and removes stale managed entries for %s', async (id, pathKey, key) => {
     const projectRoot = await mkdtemp(path.join(os.tmpdir(), 'agents-sync-ownership-'))
     tempDirs.push(projectRoot)
