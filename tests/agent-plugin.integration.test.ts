@@ -57,6 +57,34 @@ afterEach(async () => {
 })
 
 describe('agent plugin export', () => {
+  it.each([false, true])('exports internal skill links portably (absolute=%s)', async absolute => {
+    const projectRoot = await makeProject()
+    const skill = path.join(projectRoot, '.agents/skills/links')
+    await mkdir(skill, { recursive: true })
+    await writeFile(path.join(skill, 'SKILL.md'), '---\nname: links\ndescription: fixture\n---\n')
+    await writeFile(path.join(skill, 'data.txt'), 'portable fixture')
+    await symlink(absolute ? path.join(skill, 'data.txt') : 'data.txt', path.join(skill, 'alias.txt'))
+    const outDir = path.join(projectRoot, 'bundle')
+    await exportPlugin({ projectRoot, outDir, name: 'links' })
+    await rm(skill, { recursive: true })
+    expect(await readFile(path.join(outDir, 'skills/links/alias.txt'), 'utf8')).toBe('portable fixture')
+    const target = await makeProject()
+    await expect(importPlugin({ projectRoot: target, pluginDir: outDir })).resolves.toBeDefined()
+  })
+
+  it('refuses to copy an escaping skill resource into an exported package', async () => {
+    const projectRoot = await makeProject()
+    const skill = path.join(projectRoot, '.agents/skills/leak')
+    await mkdir(skill, { recursive: true })
+    await writeFile(path.join(skill, 'SKILL.md'), '---\nname: leak\ndescription: fixture\n---\n')
+    const outside = path.join(projectRoot, 'private.txt')
+    await writeFile(outside, 'private fixture')
+    await symlink(outside, path.join(skill, 'private.txt'))
+    const outDir = path.join(projectRoot, 'bundle')
+    await expect(exportPlugin({ projectRoot, outDir, name: 'leak' })).rejects.toThrow(/outside/)
+    expect(await pathExists(path.join(outDir, 'skills/leak/private.txt'))).toBe(false)
+  })
+
   it('writes a manifest and mcp.json that match the specification', async () => {
     const projectRoot = await makeProject()
     const outDir = path.join(projectRoot, 'dist', 'plugin')

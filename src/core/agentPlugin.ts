@@ -262,9 +262,8 @@ export async function exportPlugin(options: ExportPluginOptions): Promise<Export
     const discovery = await discoverSkills(paths.agentsSkillsDir)
     skillCount = discovery.skills.length
     if (skillCount > 0) {
-      // Symlinks are copied as symlinks: following them would pull files from outside
-      // the project into a package that gets published.
-      await copyDir(paths.agentsSkillsDir, skillsOut)
+      // Materialize internal links so the package remains independent of its source.
+      await copyContainedPluginAssets(paths.agentsSkillsDir, skillsOut)
     }
     for (const duplicate of discovery.duplicates) {
       warnings.push(`Skill name "${duplicate.name}" is duplicated; plugin clients expect unique skill names.`)
@@ -297,6 +296,39 @@ function containsPath(parent: string, child: string): boolean {
   return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative))
 }
 
+/** Materialize contained assets, retaining executable permissions and rejecting cycles. */
+async function copyContainedPluginAssets(sourceRoot: string, destinationRoot: string, boundaryRoot = sourceRoot, hash?: ReturnType<typeof createHash>): Promise<void> {
+  const boundary = await realpath(boundaryRoot)
+  const copy = async (source: string, relative: string, ancestors: Set<string>): Promise<void> => {
+    const resolved = await realpath(source)
+    if (!containsPath(boundary, resolved)) {
+      throw new Error(`Plugin asset "${relative}" links outside the plugin directory.`)
+    }
+    const info = await stat(resolved)
+    const destination = path.join(destinationRoot, relative)
+    if (info.isDirectory()) {
+      if (ancestors.has(resolved)) throw new Error(`Plugin asset "${relative}" contains a symlink cycle.`)
+      await ensureDir(destination)
+      hash?.update(JSON.stringify(['directory', relative]))
+      const nextAncestors = new Set([...ancestors, resolved])
+      for (const entry of (await readdir(resolved)).sort()) {
+        if (entry === '.git') continue
+        await copy(path.join(resolved, entry), path.join(relative, entry), nextAncestors)
+      }
+    } else if (info.isFile()) {
+      const content = await readFile(resolved)
+      const mode = info.mode & 0o777
+      hash?.update(JSON.stringify(['file', relative, mode, content.length]))
+      hash?.update(content)
+      await writeFile(destination, content)
+      await chmod(destination, mode)
+    } else {
+      throw new Error(`Plugin asset "${relative}" is not a regular file or directory.`)
+    }
+  }
+  await copy(sourceRoot, '', new Set())
+}
+
 /** Install a self-contained snapshot without following links outside the package. */
 async function installPluginSnapshot(pluginDir: string, pluginsDir: string, name: string): Promise<string> {
   const sourceRoot = await realpath(pluginDir)
@@ -308,36 +340,8 @@ async function installPluginSnapshot(pluginDir: string, pluginsDir: string, name
   const staging = await mkdtemp(path.join(installRoot, '.staging-'))
   const hash = createHash('sha256')
 
-  const copy = async (source: string, relative: string, ancestors: Set<string>): Promise<void> => {
-    const resolved = await realpath(source)
-    if (!containsPath(sourceRoot, resolved)) {
-      throw new Error(`Plugin asset "${relative}" links outside the plugin directory.`)
-    }
-    const info = await stat(resolved)
-    const destination = path.join(staging, relative)
-    if (info.isDirectory()) {
-      if (ancestors.has(resolved)) throw new Error(`Plugin asset "${relative}" contains a symlink cycle.`)
-      await ensureDir(destination)
-      hash.update(JSON.stringify(['directory', relative]))
-      const nextAncestors = new Set([...ancestors, resolved])
-      for (const entry of (await readdir(resolved)).sort()) {
-        if (entry === '.git') continue
-        await copy(path.join(resolved, entry), path.join(relative, entry), nextAncestors)
-      }
-    } else if (info.isFile()) {
-      const content = await readFile(resolved)
-      const mode = info.mode & 0o777
-      hash.update(JSON.stringify(['file', relative, mode, content.length]))
-      hash.update(content)
-      await writeFile(destination, content)
-      await chmod(destination, mode)
-    } else {
-      throw new Error(`Plugin asset "${relative}" is not a regular file or directory.`)
-    }
-  }
-
   try {
-    await copy(sourceRoot, '', new Set())
+    await copyContainedPluginAssets(sourceRoot, staging, sourceRoot, hash)
     const installed = path.join(installRoot, `${name}-${hash.digest('hex')}`)
     if (!(await pathExists(installed))) await rename(staging, installed)
     return path.join(path.resolve(pluginsDir), path.basename(installed))
