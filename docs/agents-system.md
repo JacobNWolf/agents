@@ -296,6 +296,9 @@ than started, and every probe has a timeout.
 package: `plugin.json`, `mcp.json` and `skills/`. It reads `.agents/agents.json` only,
 never `local.json`, so a package carries `${VAR}` placeholders instead of secrets.
 `${PROJECT_ROOT}` becomes the specification's `${PLUGIN_ROOT}`.
+Immediate skills keep shared resources beside them. Grouped skills are flattened only
+when their grouping directories contain skills alone. Move group-level supporting files
+inside each skill before exporting, so flattening cannot silently break relative paths.
 
 `agents plugin import` goes the other way, prefixing imported server names with the
 plugin name so nothing already defined is replaced. Scripts and resources are installed

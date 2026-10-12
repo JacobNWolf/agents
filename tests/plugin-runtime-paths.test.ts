@@ -73,6 +73,35 @@ it.each([false, true])('re-exports imported runtimes without their private data 
   expect(await pathExists(server.cwd!)).toBe(true)
 })
 
+it('exports shared skill resources alongside immediate skills', async () => {
+  const { root, projectRoot } = await fixture({ type: 'stdio', command: 'node' })
+  const skills = path.join(projectRoot, '.agents/skills')
+  await mkdir(path.join(skills, 'alpha'), { recursive: true })
+  await mkdir(path.join(skills, 'shared'))
+  await writeFile(path.join(skills, 'alpha/SKILL.md'), '---\nname: alpha\ndescription: fixture\n---\nRun run.mjs.')
+  await writeFile(path.join(skills, 'alpha/run.mjs'), "import { value } from '../shared/helper.mjs'; console.log(value)")
+  await writeFile(path.join(skills, 'shared/helper.mjs'), "export const value = 'shared resource works'")
+  const outDir = path.join(root, 'shared-bundle')
+  await exportPlugin({ projectRoot, outDir, name: 'shared' })
+  await rm(projectRoot, { recursive: true })
+  const result = spawnSync(process.execPath, [path.join(outDir, 'skills/alpha/run.mjs')], { encoding: 'utf8' })
+  expect(result.status).toBe(0)
+  expect(result.stdout.trim()).toBe('shared resource works')
+})
+
+it('rejects grouped shared resources before flattening changes their relative paths', async () => {
+  const { root, projectRoot } = await fixture({ type: 'stdio', command: 'node' })
+  const group = path.join(projectRoot, '.agents/skills/team')
+  await mkdir(path.join(group, 'alpha'), { recursive: true })
+  await mkdir(path.join(group, 'shared'))
+  await writeFile(path.join(group, 'alpha/SKILL.md'), '---\nname: alpha\ndescription: fixture\n---\nRun run.mjs.')
+  await writeFile(path.join(group, 'alpha/run.mjs'), "import '../shared/helper.mjs'")
+  await writeFile(path.join(group, 'shared/helper.mjs'), 'console.log("shared")')
+  const outDir = path.join(root, 'bundle')
+  await expect(exportPlugin({ projectRoot, outDir, name: 'grouped' })).rejects.toThrow(/shared resources/)
+  expect(await pathExists(outDir)).toBe(false)
+})
+
 it('resolves a relative command independently of a different cwd', async () => {
   const { pluginDir, projectRoot } = await fixture({ type: 'stdio', command: './bin/server', cwd: '${PLUGIN_ROOT}/work' })
   await mkdir(path.join(pluginDir, 'bin'))

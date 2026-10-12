@@ -256,6 +256,23 @@ export async function exportPlugin(options: ExportPluginOptions): Promise<Export
   if (discovery.duplicates.length > 0) {
     throw new Error(`Cannot export duplicate skill names: ${discovery.duplicates.map(item => item.name).join(', ')}.`)
   }
+  const checkedGroups = new Set<string>()
+  for (const skill of discovery.skills.filter(item => item.relativePath.includes('/'))) {
+    if (await pathExists(path.join(paths.agentsSkillsDir, skill.name))) {
+      throw new Error(`Cannot flatten skill "${skill.relativePath}": "${skill.name}" is already a shared resource path.`)
+    }
+    for (let group = path.dirname(skill.sourcePath); group !== paths.agentsSkillsDir; group = path.dirname(group)) {
+      if (checkedGroups.has(group)) break
+      checkedGroups.add(group)
+      for (const entry of await readdir(group)) {
+        if (entry === '.git') continue
+        const candidate = path.join(group, entry)
+        if (!discovery.skills.some(item => containsPath(candidate, item.sourcePath))) {
+          throw new Error(`Cannot flatten skill "${skill.relativePath}" with shared resources in its group. Move supporting files inside each skill before exporting.`)
+        }
+      }
+    }
+  }
   await ensureDir(outDir)
   await writeJsonAtomic(path.join(outDir, 'plugin.json'), manifest)
   await writeJsonAtomic(path.join(outDir, 'mcp.json'), file)
@@ -279,7 +296,10 @@ export async function exportPlugin(options: ExportPluginOptions): Promise<Export
   await removeIfExists(skillsOut)
 
   const skillCount = discovery.skills.length
-  for (const skill of discovery.skills) {
+  if (await pathExists(paths.agentsSkillsDir)) {
+    await copyContainedPluginAssets(paths.agentsSkillsDir, skillsOut)
+  }
+  for (const skill of discovery.skills.filter(item => item.relativePath.includes('/'))) {
     await copyContainedPluginAssets(skill.sourcePath, path.join(skillsOut, skill.name), paths.agentsSkillsDir)
   }
   await writeExportInventory(outDir)
