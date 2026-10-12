@@ -1,4 +1,5 @@
 import path from 'node:path'
+import { isDeepStrictEqual } from 'node:util'
 import { lstat, readlink, readdir, rmdir } from 'node:fs/promises'
 import { applyEdits as applyJsoncEdits, createScanner, modify as modifyJsonc, parse as parseJsonc, SyntaxKind } from 'jsonc-parser'
 import { cleanupManagedGitignore } from '../core/gitignore.js'
@@ -340,7 +341,7 @@ async function removeManagedMapEntries(
     // can identify legacy ownership when no applied-state record exists.
     const preview = isRecord(generated[key]) ? generated[key] : {}
     managedNames = Object.keys(preview).filter(name =>
-      JSON.stringify(remaining[name]) === JSON.stringify(preview[name]))
+      isDeepStrictEqual(remaining[name], preview[name]))
   }
   for (const managedName of managedNames) {
     delete remaining[managedName]

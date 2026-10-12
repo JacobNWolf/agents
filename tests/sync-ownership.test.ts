@@ -23,6 +23,26 @@ afterEach(async () => {
 })
 
 describe('sync config ownership', () => {
+  it.each(cases)('adopts legacy %s entries regardless of JSON property order', async (id, pathKey, key) => {
+    const projectRoot = await mkdtemp(path.join(os.tmpdir(), 'agents-reordered-ownership-'))
+    tempDirs.push(projectRoot)
+    vi.stubEnv('AGENTS_HOME_DIR', path.join(projectRoot, 'home'))
+    const paths = getProjectPaths(projectRoot)
+    const target = paths[pathKey]
+    const hook = INTEGRATION_SYNC_HOOKS.find(hook => hook.id === id)!
+    const previous = { command: 'node', args: ['one', 'two'], env: { ONE: '1', TWO: '2' } }
+    const reordered = { env: { TWO: '2', ONE: '1' }, args: ['one', 'two'], command: 'node' }
+    const manual = { ...reordered, args: ['two', 'one'] }
+    await mkdir(path.dirname(target), { recursive: true })
+    await writeFile(target, JSON.stringify({ [key]: { old: reordered, manual } }))
+    await hook.materialize!({
+      projectRoot, paths, config: createDefaultAgentsConfig(), enabled: false,
+      check: false, changed: [], warnings: [], generatedByIntegration: {},
+      previousGeneratedByIntegration: { [id]: JSON.stringify({ [key]: { old: previous, manual: previous } }) }
+    })
+    expect(JSON.parse(await readFile(target, 'utf8'))[key]).toEqual({ manual })
+  })
+
   it.each(cases)('retains legacy %s ownership evidence until a successful retry', async (id, pathKey, key) => {
     const projectRoot = await mkdtemp(path.join(os.tmpdir(), 'agents-legacy-retry-'))
     tempDirs.push(projectRoot)

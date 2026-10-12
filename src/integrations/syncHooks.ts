@@ -1,4 +1,5 @@
 import path from 'node:path'
+import { isDeepStrictEqual } from 'node:util'
 import { ensureDir, pathExists, readJson, readTextOrEmpty, removeIfExists, writeJsonAtomic } from '../core/fs.js'
 import { toChangedEntry, writeManagedFile } from '../core/managedFiles.js'
 import { mergeCodexConfig, removeCodexManagedBlock } from '../core/codexConfig.js'
@@ -862,7 +863,7 @@ async function mergeManagedKey(args: {
       const previous = recordFrom(parseJsonObject(args.previousGenerated, 'previous generated config')[key])
       const current = recordFrom(existing[key])
       previousNames = Object.keys(previous).filter(name =>
-        JSON.stringify(current[name]) === JSON.stringify(previous[name]))
+        isDeepStrictEqual(current[name], previous[name]))
     } catch {
       // An unreadable preview is not evidence of ownership.
     }
