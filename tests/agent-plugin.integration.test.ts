@@ -57,6 +57,33 @@ afterEach(async () => {
 })
 
 describe('agent plugin export', () => {
+  it('exports grouped skills as immediate children with their resources', async () => {
+    const projectRoot = await makeProject()
+    await rm(path.join(projectRoot, '.agents/skills'), { recursive: true })
+    const skill = path.join(projectRoot, '.agents/skills/team/nested')
+    await mkdir(path.join(skill, 'scripts'), { recursive: true })
+    await writeFile(path.join(skill, 'SKILL.md'), '---\nname: nested\ndescription: fixture\n---\n')
+    await writeFile(path.join(skill, 'scripts/run.js'), 'fixture resource')
+    const outDir = path.join(projectRoot, 'bundle')
+    const result = await exportPlugin({ projectRoot, outDir, name: 'nested' })
+    expect(result.skillCount).toBe(1)
+    expect(await pathExists(path.join(outDir, 'skills/nested/SKILL.md'))).toBe(true)
+    expect(await readFile(path.join(outDir, 'skills/nested/scripts/run.js'), 'utf8')).toBe('fixture resource')
+    expect((await validatePlugin(outDir)).skillCount).toBe(1)
+  })
+
+  it('rejects duplicate flattened skill names before writing a package', async () => {
+    const projectRoot = await makeProject()
+    for (const group of ['a', 'b']) {
+      const skill = path.join(projectRoot, '.agents/skills', group, 'duplicate')
+      await mkdir(skill, { recursive: true })
+      await writeFile(path.join(skill, 'SKILL.md'), '---\nname: duplicate\ndescription: fixture\n---\n')
+    }
+    const outDir = path.join(projectRoot, 'bundle')
+    await expect(exportPlugin({ projectRoot, outDir, name: 'duplicates' })).rejects.toThrow(/duplicate/i)
+    expect(await pathExists(outDir)).toBe(false)
+  })
+
   it.each([false, true])('exports internal skill links portably (absolute=%s)', async absolute => {
     const projectRoot = await makeProject()
     const skill = path.join(projectRoot, '.agents/skills/links')

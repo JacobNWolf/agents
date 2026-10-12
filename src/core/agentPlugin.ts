@@ -248,6 +248,10 @@ export async function exportPlugin(options: ExportPluginOptions): Promise<Export
   if (containsPath(realOutput, realSource) || containsPath(realSource, realOutput)) {
     throw new Error('Plugin output must not overlap the .agents source directory. Choose a separate output directory.')
   }
+  const discovery = await discoverSkills(paths.agentsSkillsDir)
+  if (discovery.duplicates.length > 0) {
+    throw new Error(`Cannot export duplicate skill names: ${discovery.duplicates.map(item => item.name).join(', ')}.`)
+  }
   await ensureDir(outDir)
   await writeJsonAtomic(path.join(outDir, 'plugin.json'), manifest)
   await writeJsonAtomic(path.join(outDir, 'mcp.json'), file)
@@ -257,17 +261,9 @@ export async function exportPlugin(options: ExportPluginOptions): Promise<Export
   const skillsOut = path.join(outDir, 'skills')
   await removeIfExists(skillsOut)
 
-  let skillCount = 0
-  if (await pathExists(paths.agentsSkillsDir)) {
-    const discovery = await discoverSkills(paths.agentsSkillsDir)
-    skillCount = discovery.skills.length
-    if (skillCount > 0) {
-      // Materialize internal links so the package remains independent of its source.
-      await copyContainedPluginAssets(paths.agentsSkillsDir, skillsOut)
-    }
-    for (const duplicate of discovery.duplicates) {
-      warnings.push(`Skill name "${duplicate.name}" is duplicated; plugin clients expect unique skill names.`)
-    }
+  const skillCount = discovery.skills.length
+  for (const skill of discovery.skills) {
+    await copyContainedPluginAssets(skill.sourcePath, path.join(skillsOut, skill.name), paths.agentsSkillsDir)
   }
 
   return {
@@ -478,9 +474,14 @@ export async function validatePlugin(pluginDir: string): Promise<ValidatePluginR
   const skillsDir = path.join(dir, 'skills')
   if (await pathExists(skillsDir)) {
     const discovery = await discoverSkills(skillsDir)
-    skillCount = discovery.skills.length
+    skillCount = discovery.skills.filter(skill => !skill.relativePath.includes('/')).length
+    for (const skill of discovery.skills.filter(skill => skill.relativePath.includes('/'))) {
+      warnings.push(`Skill "${skill.relativePath}" is nested; plugin clients only load immediate children of skills/.`)
+    }
     for (const duplicate of discovery.duplicates) {
-      errors.push(`Skill name "${duplicate.name}" appears more than once`)
+      if (duplicate.relativePaths.filter(relative => !relative.includes('/')).length > 1) {
+        errors.push(`Skill name "${duplicate.name}" appears more than once`)
+      }
     }
   }
 
@@ -623,7 +624,7 @@ export async function importPlugin(args: {
     const pluginSkills = path.join(dir, 'skills')
     if (await pathExists(pluginSkills)) {
       const discovery = await discoverSkills(path.join(await install(), 'skills'))
-      for (const skill of discovery.skills) {
+      for (const skill of discovery.skills.filter(skill => !skill.relativePath.includes('/'))) {
         const targetDir = path.join(paths.agentsSkillsDir, skill.name)
         if (await pathExists(targetDir)) {
           warnings.push(`Skill "${skill.name}" already exists in .agents/skills; left untouched.`)

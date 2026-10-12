@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Plugin export flattens grouped skills with their resources and rejects duplicate output names; validation and import count only standard immediate-child skills.
+
 - Plugin export materializes internal skill links portably, retains executable permissions and refuses escaping resources, so its own bundles can be imported after removing their sources.
 
 - Imported plugin servers receive PLUGIN_ROOT and PLUGIN_DATA, with portable, gitignored data storage retained across package updates and recreated by sync or budget after cloning.
