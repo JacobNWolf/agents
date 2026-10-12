@@ -593,7 +593,7 @@ async function probeLegacyHttpServer(
   server: ResolvedMcpServer,
   baseHeaders: Record<string, string>,
   version: string,
-  timeoutMs: number,
+  remainingMs: () => number,
 ): Promise<ProbeResult> {
   const url = server.url as string
   const headers = { ...baseHeaders }
@@ -607,7 +607,7 @@ async function probeLegacyHttpServer(
       method: 'initialize',
       params: { protocolVersion: version, capabilities: {}, clientInfo: CLIENT_INFO }
     },
-    timeoutMs,
+    remainingMs(),
   )
 
   if (!init.response.ok) {
@@ -630,7 +630,7 @@ async function probeLegacyHttpServer(
   headers['mcp-protocol-version'] = negotiated
 
   try {
-    await postJsonRpc(url, headers, { jsonrpc: '2.0', method: 'notifications/initialized' }, timeoutMs)
+    await postJsonRpc(url, headers, { jsonrpc: '2.0', method: 'notifications/initialized' }, remainingMs())
   } catch {
     // A server that does not accept the notification still answers tools/list.
   }
@@ -648,7 +648,7 @@ async function probeLegacyHttpServer(
         method: 'tools/list',
         params: cursor === undefined ? {} : { cursor }
       },
-      timeoutMs,
+      remainingMs(),
     )
 
     if (!list.response.ok) {
@@ -678,6 +678,7 @@ async function probeLegacyHttpServer(
     if (cursor === undefined) break
   }
 
+  remainingMs()
   return { server: server.name, ok: true, tools, characters }
 }
 
@@ -723,7 +724,13 @@ async function probeHttpServer(server: ResolvedMcpServer, timeoutMs: number): Pr
 
   try {
     let version = PROTOCOL_VERSION
-    let attempt = await requestModernToolsList(url, baseHeaders, version, timeoutMs)
+    const deadline = performance.now() + timeoutMs
+    const remainingMs = (): number => {
+      const remaining = deadline - performance.now()
+      if (remaining <= 0) throw new DOMException('Server deadline expired', 'AbortError')
+      return remaining
+    }
+    let attempt = await requestModernToolsList(url, baseHeaders, version, remainingMs())
     let message = parseRpcBody(attempt.text)
 
     if (message?.error?.code === UNSUPPORTED_PROTOCOL_VERSION) {
@@ -732,10 +739,10 @@ async function probeHttpServer(server: ResolvedMcpServer, timeoutMs: number): Pr
         return fail(message.error.message ?? 'server supports no protocol version this CLI speaks')
       }
       if (choice.era === 'legacy') {
-        return await probeLegacyHttpServer(server, baseHeaders, choice.version, timeoutMs)
+        return await probeLegacyHttpServer(server, baseHeaders, choice.version, remainingMs)
       }
       version = choice.version
-      attempt = await requestModernToolsList(url, baseHeaders, version, timeoutMs)
+      attempt = await requestModernToolsList(url, baseHeaders, version, remainingMs())
       message = parseRpcBody(attempt.text)
     }
 
@@ -749,7 +756,7 @@ async function probeHttpServer(server: ResolvedMcpServer, timeoutMs: number): Pr
     }
 
     if (!attempt.response.ok || !message || message.error || message.result === undefined) {
-      return await probeLegacyHttpServer(server, baseHeaders, LEGACY_PROTOCOL_VERSION, timeoutMs)
+      return await probeLegacyHttpServer(server, baseHeaders, LEGACY_PROTOCOL_VERSION, remainingMs)
     }
 
     const tools: ProbedTool[] = []
@@ -766,13 +773,14 @@ async function probeHttpServer(server: ResolvedMcpServer, timeoutMs: number): Pr
       page += 1
       if (cursor === undefined || page >= MAX_TOOL_PAGES) break
 
-      attempt = await requestModernToolsList(url, baseHeaders, version, timeoutMs, cursor)
+      attempt = await requestModernToolsList(url, baseHeaders, version, remainingMs(), cursor)
       message = parseRpcBody(attempt.text)
       if (!attempt.response.ok || !message || message.error || message.result === undefined) {
         return fail(message?.error?.message ?? `tools/list page returned HTTP ${String(attempt.response.status)}`)
       }
     }
 
+    remainingMs()
     return { server: server.name, ok: true, tools, characters }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)

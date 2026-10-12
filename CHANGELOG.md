@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- HTTP MCP budget uses one per-server deadline across protocol negotiation, initialization and every tools/list page instead of resetting the timeout for each request.
+
 - HTTP MCP budget honors bearerTokenEnvVar, preserves explicit authorization headers and reports missing or invalid credentials without printing token values.
 
 - Doctor reports missing configs for integrations with selected MCP servers and repairs them with --fix, while allowing absent configs for empty profiles and respecting Claude scope.
