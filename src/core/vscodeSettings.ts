@@ -19,10 +19,11 @@ export async function syncVscodeSettings(args: {
   projectRoot: string
 }): Promise<void> {
   const { settingsPath, statePath, hiddenPaths, hideGenerated, check, changed, warnings, projectRoot } = args
-  const hasSettings = await pathExists(settingsPath)
-  const raw = hasSettings ? await readFile(settingsPath, 'utf8') : '{}\n'
   const state = await loadState(statePath, warnings)
   const managedSet = new Set(state.managedPaths)
+  if (!hideGenerated && managedSet.size === 0) return
+  const hasSettings = await pathExists(settingsPath)
+  const raw = hasSettings ? await readFile(settingsPath, 'utf8') : '{}\n'
 
   const parseErrors: ParseError[] = []
   const parsed = parse(raw, parseErrors, {

@@ -15,6 +15,22 @@ afterEach(async () => {
 })
 
 describe('sync failure reporting', () => {
+  it.each(['codexConfig', 'grokConfig', 'vscodeSettings'] as const)('ignores malformed unowned %s when its feature is disabled', async key => {
+    const projectRoot = await mkdtemp(path.join(os.tmpdir(), 'agents-sync-unowned-'))
+    tempDirs.push(projectRoot)
+    vi.stubEnv('AGENTS_HOME_DIR', path.join(projectRoot, 'home'))
+    vi.stubEnv('PATH', '')
+    const config = createDefaultAgentsConfig({ enabledIntegrations: ['junie'], mcpServers: { docs: { transport: 'stdio', command: 'node' } } })
+    config.workspace.vscode.hideGenerated = false
+    await saveAgentsConfig(projectRoot, config)
+    const paths = getProjectPaths(projectRoot)
+    await mkdir(path.dirname(paths[key]), { recursive: true })
+    await writeFile(paths[key], 'invalid = "unfinished')
+    await expect(performSync({ projectRoot, check: false, verbose: false })).resolves.toBeDefined()
+    expect(await readFile(paths[key], 'utf8')).toBe('invalid = "unfinished')
+    expect(await readFile(paths.junieMcp, 'utf8')).toContain('docs')
+  })
+
   it.each([true, false])('exits nonzero for an unreadable config (check=%s)', async check => {
     const projectRoot = await mkdtemp(path.join(os.tmpdir(), 'agents-sync-errors-'))
     tempDirs.push(projectRoot)

@@ -71,14 +71,13 @@ export function mergeCodexConfig(existingContent: string, generatedContent: stri
 
 /** Remove this project's managed MCP block while preserving surrounding TOML. */
 export function removeCodexManagedBlock(existingContent: string): string {
-  validateToml(existingContent, 'existing Codex TOML')
-
   const beginLines = findStandaloneCommentLines(existingContent, CODEX_MANAGED_MCP_BEGIN)
   const endLines = findStandaloneCommentLines(existingContent, CODEX_MANAGED_MCP_END)
   const beginLine = beginLines[0]
   const endLine = endLines[0]
 
   if (beginLine === undefined && endLine === undefined) return existingContent
+  validateToml(existingContent, 'existing Codex TOML')
   if (
     beginLines.length > 1
     || endLines.length > 1
