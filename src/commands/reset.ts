@@ -7,8 +7,9 @@ import { readGooseDocument, readGooseExtensions, setGooseExtensions, writeGooseC
 import { getProjectPaths } from '../core/paths.js'
 import type { ProjectPaths } from '../core/paths.js'
 import { loadAgentsConfig } from '../core/config.js'
-import { loadResolvedRegistry } from '../core/mcp.js'
+import { loadResolvedRegistry, resolveFromConfigAndLocal } from '../core/mcp.js'
 import { INTEGRATIONS } from '../integrations/registry.js'
+import { INTEGRATION_SYNC_HOOKS } from '../integrations/syncHooks.js'
 import { toProjectScopedName } from '../core/globalScope.js'
 import { readProjectMcpManagedNames } from '../core/projectMcp.js'
 import {
@@ -220,7 +221,7 @@ async function cleanupGeminiConfig(args: JsonConfigCleanupArgs): Promise<void> {
     return
   }
 
-  const generated = await readGeneratedObjectForCleanup(args.generatedPath, 'Gemini', args.warnings)
+  const generated = await readGeneratedObjectForCleanup(args, 'Gemini')
   if (generated === null) return
 
   const cleaned = { ...existing }
@@ -251,7 +252,7 @@ async function cleanupOpencodeConfig(args: JsonConfigCleanupArgs): Promise<void>
     return
   }
 
-  const generated = await readGeneratedObjectForCleanup(args.generatedPath, 'OpenCode', args.warnings)
+  const generated = await readGeneratedObjectForCleanup(args, 'OpenCode')
   if (generated === null) return
 
   const cleaned = { ...existing }
@@ -290,29 +291,40 @@ async function readConfigObjectForCleanup(
   }
 }
 
-/** Read generated ownership state used to identify managed JSON entries. */
+/** Read a preview when available, without making it a prerequisite for applied ownership. */
 async function readGeneratedObjectForCleanup(
-  generatedPath: string,
+  args: JsonConfigCleanupArgs,
   label: string,
-  warnings: string[],
 ): Promise<Record<string, unknown> | null> {
-  if (!(await pathExists(generatedPath))) {
-    warnings.push(`Could not identify managed ${label} settings because ${generatedPath} is missing; preserved the config file.`)
-    return null
-  }
   try {
-    const parsed = await readJson<unknown>(generatedPath)
-    if (!isRecord(parsed)) {
-      warnings.push(`Could not identify managed ${label} settings because ${generatedPath} is not a JSON object; preserved the config file.`)
-      return null
-    }
-    return parsed
-  } catch (error) {
-    warnings.push(
-      `Could not identify managed ${label} settings because ${generatedPath} could not be read; preserved the config file. ${error instanceof Error ? error.message : String(error)}`,
-    )
-    return null
+    const parsed = await readJson<unknown>(args.generatedPath)
+    if (isRecord(parsed)) return parsed
+  } catch {
+    // A preview is disposable; the applied ownership record remains authoritative.
   }
+  if (args.statePath && await pathExists(args.statePath)) return {}
+
+  // A commit-generated clone has configs but no local preview/state. Reconstruct
+  // only the selected public definition, then require a structural content match.
+  try {
+    const config = await loadAgentsConfig(args.projectRoot)
+    const paths = getProjectPaths(args.projectRoot)
+    const hook = INTEGRATION_SYNC_HOOKS.find(item => item.generatedPath(paths) === args.generatedPath)
+    if (config.syncMode === 'commit-generated' && hook && config.integrations.enabled.includes(hook.id)) {
+      const resolved = resolveFromConfigAndLocal({
+        projectRoot: args.projectRoot,
+        servers: Object.fromEntries(Object.entries(config.mcp.servers).map(([name, server]) => [name, { ...server, requiredEnv: [] }])),
+        local: { mcpServers: {} },
+        profile: config.activeProfile ? config.profiles?.[config.activeProfile] : undefined
+      })
+      const generated: unknown = JSON.parse(hook.buildGenerated(resolved.publicServersByTarget[hook.id]).content)
+      if (isRecord(generated)) return generated
+    }
+  } catch {
+    // Unknown source definitions cannot establish ownership.
+  }
+  args.warnings.push(`Could not identify managed ${label} settings because ${args.generatedPath} is unavailable; preserved the config file.`)
+  return null
 }
 
 /** Remove generated map keys from a materialized JSON object without touching unknown entries. */
@@ -517,7 +529,7 @@ async function cleanupKeyedJsonConfig(
     return
   }
 
-  const generated = await readGeneratedObjectForCleanup(args.generatedPath, label, args.warnings)
+  const generated = await readGeneratedObjectForCleanup(args, label)
   if (generated === null) return
 
   const cleaned = { ...existing }

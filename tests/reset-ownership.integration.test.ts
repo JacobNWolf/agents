@@ -43,6 +43,44 @@ describe('reset config ownership', () => {
     await expect(readFile(paths.copilotCliGithubMcp)).rejects.toThrow()
   })
 
+  it.each([false, true])('uses applied ownership without a readable preview (corrupt=%s)', async corrupt => {
+    const projectRoot = await fixture()
+    vi.stubEnv('PATH', '')
+    await saveAgentsConfig(projectRoot, createDefaultAgentsConfig({ enabledIntegrations: ['cursor'], mcpServers: {
+      docs: { transport: 'stdio', command: 'node' }
+    } }))
+    await performSync({ projectRoot, check: false, verbose: false })
+    const paths = getProjectPaths(projectRoot)
+    const payload = JSON.parse(await readFile(paths.cursorMcp, 'utf8'))
+    payload.mcpServers.manual = { command: 'manual' }
+    await writeFile(paths.cursorMcp, JSON.stringify(payload))
+    if (corrupt) await writeFile(paths.generatedCursor, '{broken')
+    else await rm(paths.generatedCursor)
+    await runReset({ projectRoot, localOnly: false, hard: false })
+    expect(JSON.parse(await readFile(paths.cursorMcp, 'utf8')).mcpServers).toEqual({ manual: { command: 'manual' } })
+  })
+
+  it('cleans matching committed configs without generated state and preserves manual entries', async () => {
+    const projectRoot = await fixture()
+    vi.stubEnv('PATH', '')
+    vi.stubEnv('REVIEW_REQUIRED_TOKEN', 'fixture-token')
+    const config = createDefaultAgentsConfig({ enabledIntegrations: ['junie'], mcpServers: {
+      docs: { transport: 'stdio', command: 'node', env: { TOKEN: '${REVIEW_REQUIRED_TOKEN}' }, requiredEnv: ['REVIEW_REQUIRED_TOKEN'] },
+      modified: { transport: 'stdio', command: 'node' }
+    } })
+    config.syncMode = 'commit-generated'
+    await saveAgentsConfig(projectRoot, config)
+    await performSync({ projectRoot, check: false, verbose: false })
+    const paths = getProjectPaths(projectRoot)
+    const payload = JSON.parse(await readFile(paths.junieMcp, 'utf8'))
+    payload.mcpServers.modified = { command: 'manual' }
+    await writeFile(paths.junieMcp, JSON.stringify(payload))
+    await rm(paths.generatedDir, { recursive: true })
+    vi.stubEnv('REVIEW_REQUIRED_TOKEN', undefined)
+    await runReset({ projectRoot, localOnly: false, hard: false })
+    expect(JSON.parse(await readFile(paths.junieMcp, 'utf8')).mcpServers).toEqual({ modified: { command: 'manual' } })
+  })
+
   it.each([false, true])('cleans relocated project MCP ownership (legacy absolute state=%s)', async legacy => {
     const parent = await fixture()
     vi.stubEnv('PATH', '')
