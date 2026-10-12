@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- MCP test resolves environment, fallback and project-root placeholders before validation while keeping substituted values out of error output.
+
 - MCP import preserves and validates schema 4 auth, timeout and tool restriction fields, including empty allowlists; OAuth client secrets are kept in local overrides.
 
 - Plugin export flattens grouped skills with their resources and rejects duplicate output names; validation and import count only standard immediate-child skills.

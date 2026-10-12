@@ -262,7 +262,7 @@ type ResolutionMode = 'full' | 'committed'
  * `${PROJECT_ROOT}`, `${VAR}` and `${VAR:-default}` are resolved here; a plain `${VAR}`
  * with nothing to resolve to is left in place and reported.
  */
-function resolveServer(
+export function resolveServer(
   name: string,
   server: McpServerDefinition,
   projectRoot: string,

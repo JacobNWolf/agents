@@ -1,5 +1,6 @@
 import path from 'node:path'
 import { listMcpEntries, loadMcpState, type McpServerEntry } from '../core/mcpCrud.js'
+import { resolveServer } from '../core/mcp.js'
 import { commandExists, runCommand } from '../core/shell.js'
 import { listCursorMcpStatuses, sanitizeTerminalOutput, type CursorServerState } from '../core/cursorCli.js'
 import { toManagedClaudeName } from '../integrations/claude.js'
@@ -83,7 +84,10 @@ export async function runMcpTest(options: McpTestOptions): Promise<void> {
   }
 
   const results: ServerTestResult[] = filtered.map((entry) => {
-    const tested = testServer(entry.name, entry.mergedServer)
+    const tested = testServer(entry.name, {
+      ...entry.mergedServer,
+      ...resolveServer(entry.name, entry.mergedServer, path.resolve(options.projectRoot), [])
+    }, entry.mergedServer)
     if (runtimeEnabled && runtime) {
       tested.runtime = runtime.perServer[entry.name] ?? {}
     }
@@ -176,7 +180,7 @@ export async function runMcpTest(options: McpTestOptions): Promise<void> {
   }
 }
 
-function testServer(name: string, server: McpServerDefinition): ServerTestResult {
+function testServer(name: string, server: McpServerDefinition, display: McpServerDefinition): ServerTestResult {
   const messages: string[] = []
 
   if (server.enabled === false) {
@@ -196,13 +200,13 @@ function testServer(name: string, server: McpServerDefinition): ServerTestResult
     if (!server.command) {
       messages.push('missing command')
     } else if (!commandExists(server.command)) {
-      messages.push(`command not found in PATH: ${sanitizeTerminalOutput(server.command)}`)
+      messages.push(`command not found in PATH: ${sanitizeTerminalOutput(display.command ?? '')}`)
     }
   } else {
     if (!server.url) {
       messages.push('missing url')
     } else if (!isValidHttpUrl(server.url)) {
-      messages.push(`invalid URL: ${sanitizeTerminalOutput(server.url)}`)
+      messages.push(`invalid URL: ${sanitizeTerminalOutput(display.url ?? '')}`)
     }
   }
 
