@@ -76,7 +76,7 @@ export async function runMcpTest(options: McpTestOptions): Promise<void> {
   }
 
   const runtime = runtimeEnabled
-    ? runRuntimeChecks(filtered, options.projectRoot, runtimeTimeoutMs)
+    ? runRuntimeChecks(filtered.filter(entry => entry.mergedServer.enabled !== false), options.projectRoot, runtimeTimeoutMs)
     : null
 
   if (runtimeEnabled) {
@@ -225,6 +225,7 @@ function testServer(name: string, server: McpServerDefinition, display: McpServe
  * reported as unsupported so the output stays honest.
  */
 function runRuntimeChecks(entries: McpServerEntry[], projectRoot: string, timeoutMs: number): RuntimeCheckResult {
+  if (entries.length === 0) return { perServer: {}, availableIntegrations: [], errors: 0 }
   const claudeProbe = probeClaude(projectRoot, timeoutMs)
   const geminiProbe = probeGemini(projectRoot, timeoutMs)
   const cursorProbe = probeCursor(projectRoot, timeoutMs)
