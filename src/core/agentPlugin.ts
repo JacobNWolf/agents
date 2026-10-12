@@ -555,15 +555,26 @@ export async function importPlugin(args: {
         const pluginRoot = '${PROJECT_ROOT}/' + relativeRoot
         // Keep the package root portable and separate from the consuming project root.
         const toProjectPlaceholder = (value: string): string => value.replaceAll('${PLUGIN_ROOT}', pluginRoot)
+        const toPluginPath = (value: string): string => {
+          const rootPrefix = '${PLUGIN_ROOT}'
+          const relative = value.startsWith('./') ? value
+            : value === rootPrefix || value.startsWith(`${rootPrefix}/`) ? `.${value.slice(rootPrefix.length)}`
+              : undefined
+          if (relative === undefined) return toProjectPlaceholder(value)
+          const resolved = path.resolve(installed, relative)
+          if (!containsPath(installed, resolved)) throw new Error(`Plugin server "${name}" path "${value}" resolves outside the plugin directory.`)
+          const suffix = path.relative(installed, resolved).split(path.sep).join('/')
+          return suffix ? `${pluginRoot}/${suffix}` : pluginRoot
+        }
         config.mcp.servers[targetName] = server.type === 'stdio'
           ? {
               transport: 'stdio',
-              command: toProjectPlaceholder(server.command ?? ''),
+              command: toPluginPath(server.command ?? ''),
               ...(server.args ? { args: server.args.map(toProjectPlaceholder) } : {}),
               ...(server.env
                 ? { env: Object.fromEntries(Object.entries(server.env).map(([k, v]) => [k, toProjectPlaceholder(v)])) }
                 : {}),
-              cwd: toProjectPlaceholder(server.cwd ?? '${PLUGIN_ROOT}')
+              cwd: toPluginPath(server.cwd ?? '${PLUGIN_ROOT}')
             }
           : {
               transport: server.type === 'sse' ? 'sse' : 'http',
