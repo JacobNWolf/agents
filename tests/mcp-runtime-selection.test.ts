@@ -6,12 +6,12 @@ import { createDefaultAgentsConfig, saveAgentsConfig } from '../src/core/config.
 import { runMcpTest } from '../src/commands/mcp-test.js'
 import * as ui from '../src/core/ui.js'
 
-const cli = vi.hoisted(() => ({ calls: [] as string[] }))
+const cli = vi.hoisted(() => ({ calls: [] as string[], cursorOutput: '' }))
 vi.mock('../src/core/shell.js', () => ({
   commandExists: () => true,
   runCommand: (command: string) => {
     cli.calls.push(command)
-    return { ok: true, code: 0, stdout: '', stderr: '', timedOut: false }
+    return { ok: true, code: 0, stdout: command === 'cursor-agent' ? cli.cursorOutput : '', stderr: '', timedOut: false }
   }
 }))
 const roots: string[] = []
@@ -19,9 +19,46 @@ afterEach(async () => {
   vi.restoreAllMocks()
   vi.unstubAllEnvs()
   cli.calls.length = 0
+  cli.cursorOutput = ''
   process.exitCode = undefined
   ui.resetContext()
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
+})
+
+it('only checks enabled integrations and servers selected by the active profile', async () => {
+  const projectRoot = await mkdtemp(path.join(os.tmpdir(), 'agents-runtime-profile-'))
+  roots.push(projectRoot)
+  vi.stubEnv('AGENTS_HOME_DIR', path.join(projectRoot, 'home'))
+  const config = createDefaultAgentsConfig({ enabledIntegrations: ['cursor'], mcpServers: {
+    alpha: { transport: 'http', url: 'https://example.com/mcp' },
+    beta: { transport: 'http', url: 'https://example.com/mcp' }
+  } })
+  config.profiles = { ci: { servers: ['alpha'] } }
+  config.activeProfile = 'ci'
+  await saveAgentsConfig(projectRoot, config)
+  cli.cursorOutput = 'alpha: ready'
+  let output = ''
+  vi.spyOn(process.stdout, 'write').mockImplementation(chunk => { output += String(chunk); return true })
+  await runMcpTest({ projectRoot, json: true, runtime: true })
+  const payload = JSON.parse(output)
+  expect(payload.errors).toBe(0)
+  expect(cli.calls).toEqual(['cursor-agent'])
+  expect(payload.runtime.availableIntegrations).toEqual(['cursor'])
+  expect(payload.results.find((entry: { name: string }) => entry.name === 'alpha').runtime.cursor.status).toBe('ok')
+  expect(payload.results.find((entry: { name: string }) => entry.name === 'beta').runtime).toEqual({})
+})
+
+it('does not probe installed CLI integrations in a Codex-only project', async () => {
+  const projectRoot = await mkdtemp(path.join(os.tmpdir(), 'agents-runtime-codex-'))
+  roots.push(projectRoot)
+  await saveAgentsConfig(projectRoot, createDefaultAgentsConfig({ enabledIntegrations: ['codex'], mcpServers: {
+    docs: { transport: 'http', url: 'https://example.com/mcp' }
+  } }))
+  let output = ''
+  vi.spyOn(process.stdout, 'write').mockImplementation(chunk => { output += String(chunk); return true })
+  await runMcpTest({ projectRoot, json: true, runtime: true })
+  expect(JSON.parse(output).errors).toBe(0)
+  expect(cli.calls).toEqual([])
 })
 
 it.each([false, true])('skips disabled runtime servers (local override=%s)', async local => {

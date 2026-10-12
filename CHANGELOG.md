@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Runtime MCP tests check only integrations and servers selected by the effective configuration and active profile, leaving unrelated installed CLIs unprobed.
+
 - Runtime MCP tests skip disabled servers, including local overrides, without probing CLIs when no active servers remain.
 
 - MCP test resolves environment, fallback and project-root placeholders before validation while keeping substituted values out of error output.

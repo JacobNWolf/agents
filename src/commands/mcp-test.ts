@@ -1,14 +1,11 @@
 import path from 'node:path'
 import { listMcpEntries, loadMcpState, type McpServerEntry } from '../core/mcpCrud.js'
-import { resolveServer } from '../core/mcp.js'
+import { resolveFromConfigAndLocal, resolveServer } from '../core/mcp.js'
 import { commandExists, runCommand } from '../core/shell.js'
 import { listCursorMcpStatuses, sanitizeTerminalOutput, type CursorServerState } from '../core/cursorCli.js'
 import { toManagedClaudeName } from '../integrations/claude.js'
-import { INTEGRATION_IDS } from '../integrations/registry.js'
 import * as ui from '../core/ui.js'
 import type { IntegrationName, McpServerDefinition } from '../types.js'
-
-const ALL_INTEGRATIONS: IntegrationName[] = INTEGRATION_IDS
 
 const DEFAULT_RUNTIME_TIMEOUT_MS = 8000
 
@@ -75,8 +72,21 @@ export async function runMcpTest(options: McpTestOptions): Promise<void> {
     spin.start('Running runtime checks...')
   }
 
+  const runtimeTargets = new Map<string, IntegrationName[]>()
+  if (runtimeEnabled) {
+    const registry = resolveFromConfigAndLocal({
+      projectRoot: path.resolve(options.projectRoot), servers: state.config.mcp.servers, local: state.local,
+      profile: state.config.activeProfile ? state.config.profiles?.[state.config.activeProfile] : undefined
+    })
+    for (const id of state.config.integrations.enabled) {
+      for (const server of registry.serversByTarget[id]) {
+        runtimeTargets.set(server.name, [...(runtimeTargets.get(server.name) ?? []), id])
+      }
+    }
+  }
   const runtime = runtimeEnabled
-    ? runRuntimeChecks(filtered.filter(entry => entry.mergedServer.enabled !== false), options.projectRoot, runtimeTimeoutMs)
+    ? runRuntimeChecks(filtered.filter(entry => entry.mergedServer.enabled !== false && runtimeTargets.has(entry.name)),
+      options.projectRoot, runtimeTimeoutMs, runtimeTargets)
     : null
 
   if (runtimeEnabled) {
@@ -224,11 +234,13 @@ function testServer(name: string, server: McpServerDefinition, display: McpServe
  * Only Claude Code, Gemini CLI and Cursor expose their MCP state; everything else is
  * reported as unsupported so the output stays honest.
  */
-function runRuntimeChecks(entries: McpServerEntry[], projectRoot: string, timeoutMs: number): RuntimeCheckResult {
+function runRuntimeChecks(entries: McpServerEntry[], projectRoot: string, timeoutMs: number, targetsByName: Map<string, IntegrationName[]>): RuntimeCheckResult {
   if (entries.length === 0) return { perServer: {}, availableIntegrations: [], errors: 0 }
-  const claudeProbe = probeClaude(projectRoot, timeoutMs)
-  const geminiProbe = probeGemini(projectRoot, timeoutMs)
-  const cursorProbe = probeCursor(projectRoot, timeoutMs)
+  const needed = new Set(entries.flatMap(entry => targetsByName.get(entry.name) ?? []))
+  const skipped = { available: false, detail: 'Integration is not enabled for the selected servers.' }
+  const claudeProbe = needed.has('claude') ? probeClaude(projectRoot, timeoutMs) : skipped
+  const geminiProbe = needed.has('gemini') ? probeGemini(projectRoot, timeoutMs) : skipped
+  const cursorProbe = needed.has('cursor') ? probeCursor(projectRoot, timeoutMs) : skipped
 
   const availableIntegrations: IntegrationName[] = []
   if (claudeProbe.available) availableIntegrations.push('claude')
@@ -239,7 +251,7 @@ function runRuntimeChecks(entries: McpServerEntry[], projectRoot: string, timeou
   let errors = 0
 
   for (const entry of entries) {
-    const targets = resolveTargets(entry.server)
+    const targets = targetsByName.get(entry.name) ?? []
     const runtimeByIntegration: Partial<Record<IntegrationName, RuntimeIntegrationResult>> = {}
 
     for (const integration of targets) {
@@ -526,13 +538,6 @@ function parseGeminiRuntimeStatuses(output: string): Record<string, GeminiRuntim
   }
 
   return statuses
-}
-
-function resolveTargets(server: McpServerDefinition): IntegrationName[] {
-  if (!server.targets || server.targets.length === 0) {
-    return ALL_INTEGRATIONS
-  }
-  return [...new Set(server.targets)]
 }
 
 function isValidHttpUrl(value: string): boolean {
