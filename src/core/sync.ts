@@ -1,4 +1,5 @@
 import path from 'node:path'
+import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { ensureDir, pathExists, readJson, readTextOrEmpty, writeJsonAtomic } from './fs.js'
 import { loadAgentsConfigDetailed, persistMigratedConfig, saveAgentsConfig } from './config.js'
@@ -40,6 +41,7 @@ import type { AgentsConfig, IntegrationName, ResolvedMcpServer, SyncOptions, Syn
 
 interface ClaudeState {
   managedNames: string[]
+  definitionHashes?: Record<string, string>
 }
 
 interface CursorState {
@@ -488,6 +490,9 @@ async function syncClaude(args: {
   }
 
   const desiredNames = enabled ? servers.map((server) => toManagedClaudeName(server.name)) : []
+  const definitionHashes = Object.fromEntries(servers.map(server => [
+    toManagedClaudeName(server.name), createHash('sha256').update(JSON.stringify(server)).digest('hex')
+  ]))
   let currentNames = state.managedNames ?? []
   const hasClaudeCli = commandExists(command)
 
@@ -507,7 +512,9 @@ async function syncClaude(args: {
     }
   }
 
-  if (equalSets(new Set(currentNames), new Set(desiredNames))) {
+  const namesToUpdate = desiredNames.filter(name => currentNames.includes(name)
+    && state.definitionHashes?.[name] !== definitionHashes[name])
+  if (equalSets(new Set(currentNames), new Set(desiredNames)) && namesToUpdate.length === 0) {
     return
   }
   changed.push('claude-local-scope')
@@ -515,7 +522,7 @@ async function syncClaude(args: {
   if (check) return
 
   // Remove servers that exist in current but not in desired (proper set difference)
-  const namesToRemove = currentNames.filter((name) => !desiredNames.includes(name))
+  const namesToRemove = currentNames.filter((name) => !desiredNames.includes(name) || namesToUpdate.includes(name))
   for (const name of namesToRemove) {
     const removed = runCommand(command, ['mcp', 'remove', '-s', 'local', name], projectRoot)
     if (
@@ -544,7 +551,10 @@ async function syncClaude(args: {
   }
 
   await ensureDir(path.dirname(statePath))
-  await writeJsonAtomic(statePath, { managedNames: appliedNames })
+  await writeJsonAtomic(statePath, {
+    managedNames: appliedNames,
+    definitionHashes: Object.fromEntries(appliedNames.map(name => [name, definitionHashes[name]]))
+  })
 }
 
 async function syncCursor(args: {

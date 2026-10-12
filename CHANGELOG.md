@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Claude local-scope sync refreshes changed definitions and credentials even when server names stay the same, storing only definition hashes in ownership state.
+
 - Reset retains comments and disabled settings in Zed and Kilo JSONC files, including after removing the final managed server.
 
 - Failed integration syncs retain legacy previews until ownership adoption succeeds, allowing retries to remove previously generated servers.
