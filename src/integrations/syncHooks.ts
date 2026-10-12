@@ -188,15 +188,24 @@ export const INTEGRATION_SYNC_HOOKS: IntegrationSyncHook[] = [
         context.warnings.push('Found legacy .antigravity/mcp.json. Antigravity now uses .agents/mcp_config.json for workspace MCP.')
       }
 
-      const previousManagedNames = await readManagedGlobalNames(context.paths.generatedAntigravityState)
-      await cleanupLegacyAntigravityGlobal({
-        globalPath: legacyGlobalPath,
-        previousManagedNames,
-        projectRoot: context.projectRoot,
-        check: context.check,
-        changed: context.changed,
-        warnings: context.warnings
-      })
+      const statePath = context.paths.generatedAntigravityState
+      const previousManagedNames = [...new Set([
+        ...await readManagedGlobalNames(statePath),
+        ...await readManagedGlobalNames(statePath, 'pendingLegacyNames')
+      ])]
+      let legacyError: unknown
+      try {
+        await cleanupLegacyAntigravityGlobal({
+          globalPath: legacyGlobalPath,
+          previousManagedNames,
+          projectRoot: context.projectRoot,
+          check: context.check,
+          changed: context.changed,
+          warnings: context.warnings
+        })
+      } catch (error) {
+        legacyError = error
+      }
 
       await syncManagedAntigravityWorkspace({
         enabled: context.enabled && mcpSyncEnabled,
@@ -208,6 +217,13 @@ export const INTEGRATION_SYNC_HOOKS: IntegrationSyncHook[] = [
         changed: context.changed,
         warnings: context.warnings
       })
+      if (!context.check) {
+        await writeJsonAtomic(statePath, {
+          managedNames: await readManagedGlobalNames(statePath),
+          ...(legacyError ? { pendingLegacyNames: previousManagedNames } : {})
+        })
+      }
+      if (legacyError) throw legacyError
     }
   },
   {
@@ -674,12 +690,12 @@ async function syncManagedWindsurfGlobal(args: {
   }
 }
 
-async function readManagedGlobalNames(statePath: string): Promise<string[]> {
+async function readManagedGlobalNames(statePath: string, key: 'managedNames' | 'pendingLegacyNames' = 'managedNames'): Promise<string[]> {
   if (!(await pathExists(statePath))) return []
   try {
-    const parsed = await readJson<ManagedGlobalState>(statePath)
-    return Array.isArray(parsed.managedNames)
-      ? parsed.managedNames.filter((name): name is string => typeof name === 'string')
+    const parsed = await readJson<ManagedGlobalState & { pendingLegacyNames?: string[] }>(statePath)
+    return Array.isArray(parsed[key])
+      ? parsed[key].filter((name): name is string => typeof name === 'string')
       : []
   } catch {
     return []

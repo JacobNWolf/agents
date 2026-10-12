@@ -15,6 +15,29 @@ afterEach(async () => {
 })
 
 describe('sync failure reporting', () => {
+  it.each([false, true])('updates the Antigravity workspace despite a broken legacy config (disconnect=%s)', async disconnect => {
+    const projectRoot = await mkdtemp(path.join(os.tmpdir(), 'agents-legacy-antigravity-'))
+    tempDirs.push(projectRoot)
+    vi.stubEnv('AGENTS_HOME_DIR', path.join(projectRoot, 'home'))
+    vi.stubEnv('PATH', '')
+    const legacy = path.join(projectRoot, 'legacy.json')
+    vi.stubEnv('AGENTS_ANTIGRAVITY_MCP_PATH', legacy)
+    const config = createDefaultAgentsConfig({ enabledIntegrations: ['antigravity'], mcpServers: { docs: { transport: 'http', url: 'https://old.example/mcp' } } })
+    await saveAgentsConfig(projectRoot, config)
+    await performSync({ projectRoot, check: false, verbose: false })
+    await writeFile(legacy, '{broken')
+    config.mcp.servers.docs.url = 'https://new.example/mcp'
+    if (disconnect) config.integrations.enabled = []
+    await saveAgentsConfig(projectRoot, config)
+    await expect(performSync({ projectRoot, check: false, verbose: false })).rejects.toThrow(/legacy Antigravity/)
+    const workspace = getProjectPaths(projectRoot).antigravityWorkspaceMcp
+    const servers = JSON.parse(await readFile(workspace, 'utf8')).mcpServers
+    expect(servers.docs).toEqual(disconnect ? undefined : { serverUrl: 'https://new.example/mcp' })
+    await writeFile(legacy, JSON.stringify({ mcpServers: { docs: { serverUrl: 'https://old.example/mcp' }, manual: { command: 'manual' } } }))
+    await performSync({ projectRoot, check: false, verbose: false })
+    expect(JSON.parse(await readFile(legacy, 'utf8')).mcpServers).toEqual({ manual: { command: 'manual' } })
+  })
+
   it.each(['codexConfig', 'grokConfig', 'vscodeSettings'] as const)('ignores malformed unowned %s when its feature is disabled', async key => {
     const projectRoot = await mkdtemp(path.join(os.tmpdir(), 'agents-sync-unowned-'))
     tempDirs.push(projectRoot)

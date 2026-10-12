@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Antigravity updates its workspace even if legacy global cleanup fails, retaining separate pending legacy ownership for a later retry.
+
 - Disabled Codex, Grok and VS Code hiding leave unrelated malformed configs untouched instead of failing a sync with no managed settings to clean.
 
 - Project MCP ownership uses portable relative paths; moved legacy projects recover ownership only where the saved preview still matches the local config.
