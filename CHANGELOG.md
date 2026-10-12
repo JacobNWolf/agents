@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Forced template initialization replaces destination symlinks atomically instead of overwriting their external targets.
+
 - Antigravity rejects skill roots and grouping directories that resolve outside the project before dereferencing their contents.
 
 - Update checks lock local.json metadata writes and defer them while configuration changes are in progress, preventing lost MCP secrets.

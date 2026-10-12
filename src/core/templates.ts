@@ -1,7 +1,7 @@
 import path from 'node:path'
-import { copyFile, lstat } from 'node:fs/promises'
+import { lstat, readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
-import { ensureDir, pathExists, writePrivateTextAtomic } from './fs.js'
+import { ensureDir, pathExists, writePrivateTextAtomic, writeTextAtomic } from './fs.js'
 import { getProjectPaths } from './paths.js'
 
 const __filename = fileURLToPath(import.meta.url)
@@ -53,7 +53,8 @@ export async function scaffoldBaseTemplates(
       continue
     }
     await ensureDir(path.dirname(pair.to))
-    await copyFile(pair.from, pair.to)
+    // Replace the destination inode rather than following a user's symlink.
+    await writeTextAtomic(pair.to, await readFile(pair.from, 'utf8'))
     changed.push(path.relative(projectRoot, pair.to) || pair.to)
   }
 
