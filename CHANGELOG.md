@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Doctor rechecks managed config syntax after applying fixes, so repaired errors no longer force a failure while unrelated source errors remain visible.
+
 - Runtime MCP tests check only integrations and servers selected by the effective configuration and active profile, leaving unrelated installed CLIs unprobed.
 
 - Runtime MCP tests skip disabled servers, including local overrides, without probing CLIs when no active servers remain.

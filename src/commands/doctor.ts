@@ -147,14 +147,16 @@ export async function runDoctor(options: DoctorOptions): Promise<void> {
     })
   }
 
-  await validateManagedConfigSyntax(
-    paths,
-    enabledForMaterialization,
-    claudeDesktopConfigPath,
-    windsurfGlobalMcpPath,
-    issues,
-    { copilotCliPath: config.integrations.options.copilotCliPath },
-  )
+  const inspectManagedSyntax = async (): Promise<Issue[]> => {
+    const syntaxIssues: Issue[] = []
+    await validateManagedConfigSyntax(
+      paths, enabledForMaterialization, claudeDesktopConfigPath, windsurfGlobalMcpPath,
+      syntaxIssues, { copilotCliPath: config.integrations.options.copilotCliPath },
+    )
+    return syntaxIssues
+  }
+  const initialSyntaxIssues = await inspectManagedSyntax()
+  issues.push(...initialSyntaxIssues)
 
   const skillWarnings = await validateSkillsDirectory(paths.agentsSkillsDir)
   for (const warning of skillWarnings) {
@@ -346,6 +348,12 @@ export async function runDoctor(options: DoctorOptions): Promise<void> {
       for (const warning of syncResult.warnings) {
         issues.push({ level: 'warning', message: warning })
       }
+      // Report the state after repair while retaining unrelated source errors.
+      const repaired = new Set(initialSyntaxIssues)
+      for (let index = issues.length - 1; index >= 0; index -= 1) {
+        if (repaired.has(issues[index])) issues.splice(index, 1)
+      }
+      issues.push(...await inspectManagedSyntax())
       fixSpin.stop('Fixes applied')
     } catch (error) {
       fixSpin.stop('Fixes failed')
