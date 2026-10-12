@@ -508,7 +508,7 @@ async function syncClaude(args: {
     if (listed.ok) {
       currentNames = listed.names
     } else {
-      warnings.push(`Failed checking Claude MCP status: ${compactError(listed.stderr)}`)
+      throw new Error(`Failed checking Claude MCP status: ${compactError(listed.stderr)}`)
     }
   }
 
@@ -523,6 +523,8 @@ async function syncClaude(args: {
 
   // Remove servers that exist in current but not in desired (proper set difference)
   const namesToRemove = currentNames.filter((name) => !desiredNames.includes(name) || namesToUpdate.includes(name))
+  const errors: string[] = []
+  const failedRemovals = new Set<string>()
   for (const name of namesToRemove) {
     const removed = runCommand(command, ['mcp', 'remove', '-s', 'local', name], projectRoot)
     if (
@@ -530,21 +532,22 @@ async function syncClaude(args: {
       !removed.stderr.includes('not found') &&
       !removed.stderr.includes('No project-local MCP server found')
     ) {
-      warnings.push(`Failed removing Claude MCP server ${name}: ${compactError(removed.stderr)}`)
+      errors.push(`Failed removing Claude MCP server ${name}: ${compactError(removed.stderr)}`)
+      failedRemovals.add(name)
     }
   }
 
-  if (!enabled) {
-    await writeJsonAtomic(statePath, { managedNames: [] })
-    return
-  }
-
   const appliedNames: string[] = []
-  for (const server of servers) {
+  for (const server of enabled ? servers : []) {
     const name = toManagedClaudeName(server.name)
+    if (failedRemovals.has(name)) continue
+    if (currentNames.includes(name) && !namesToUpdate.includes(name)) {
+      appliedNames.push(name)
+      continue
+    }
     const result = addClaudeServer(command, projectRoot, name, server)
     if (!result.ok) {
-      warnings.push(`Failed adding Claude MCP server ${name}: ${compactError(result.stderr)}`)
+      errors.push(`Failed adding Claude MCP server ${name}: ${compactError(result.stderr)}`)
       continue
     }
     appliedNames.push(name)
@@ -552,9 +555,13 @@ async function syncClaude(args: {
 
   await ensureDir(path.dirname(statePath))
   await writeJsonAtomic(statePath, {
-    managedNames: appliedNames,
-    definitionHashes: Object.fromEntries(appliedNames.map(name => [name, definitionHashes[name]]))
+    managedNames: [...new Set([...appliedNames, ...failedRemovals])],
+    definitionHashes: {
+      ...Object.fromEntries([...failedRemovals].map(name => [name, state.definitionHashes?.[name]])),
+      ...Object.fromEntries(appliedNames.map(name => [name, definitionHashes[name]]))
+    }
   })
+  if (errors.length > 0) throw new Error(errors.join('\n'))
 }
 
 async function syncCursor(args: {
