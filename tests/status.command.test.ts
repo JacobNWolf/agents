@@ -2,6 +2,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { toProjectScopedName } from '../src/core/globalScope.js'
 import { runInit } from '../src/commands/init.js'
 import { runStatus } from '../src/commands/status.js'
 import { loadAgentsConfig, saveAgentsConfig } from '../src/core/config.js'
@@ -157,6 +158,25 @@ describe('status command', () => {
     expect(parsed.files['.gemini/skills']).toBe(true)
     expect(parsed.probes.antigravity_skills).toMatch(/^\d+ skill\(s\) in flat copy bridge$/)
   }, 20_000)
+
+  it('recognizes this project user-scope Claude entries in runtime status', async () => {
+    const projectRoot = await mkdtemp(path.join(os.tmpdir(), 'agents-status-user-'))
+    tempDirs.push(projectRoot)
+    await runInit({ projectRoot, force: true })
+    const config = await loadAgentsConfig(projectRoot)
+    config.integrations.enabled = ['claude']
+    config.integrations.options.claudeScope = 'user'
+    config.mcp.servers = { docs: { transport: 'http', url: 'https://example.com/mcp' } }
+    await saveAgentsConfig(projectRoot, config)
+    vi.spyOn(shell, 'commandExists').mockImplementation(command => command === 'claude')
+    vi.spyOn(shell, 'runCommand').mockReturnValue({
+      ok: true, code: 0, stderr: '', timedOut: false,
+      stdout: `${toProjectScopedName(projectRoot, 'docs')}: https://example.com/mcp - ✓ Connected`
+    })
+    const output = await captureStdout(() => runStatus({ projectRoot, json: true, verbose: false, fast: false }))
+    const parsed = JSON.parse(output) as { probes: Record<string, string> }
+    expect(parsed.probes.claude).toBe('1/1 MCP server(s) detected')
+  })
 
   it('includes root CLAUDE.md file state when Claude is enabled', async () => {
     const projectRoot = await mkdtemp(path.join(os.tmpdir(), 'agents-status-'))

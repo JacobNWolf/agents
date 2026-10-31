@@ -357,12 +357,7 @@ function probeCodex(projectRoot: string, expectedServerNames: string[]): string 
   }
 }
 
-/**
- * Count the MCP servers Claude Code sees for this project.
- *
- * Project scope registers servers under their plain names, local scope under the
- * `agents__` prefix, so both spellings are counted.
- */
+/** Count the MCP servers Claude Code sees for this project. */
 function probeClaude(projectRoot: string, expectedServerNames: string[]): string {
   if (!commandExists('claude')) return 'claude CLI not found'
   const result = runCommand('claude', ['mcp', 'list'], projectRoot)
@@ -371,15 +366,13 @@ function probeClaude(projectRoot: string, expectedServerNames: string[]): string
     .split('\n')
     .map((line) => line.trim())
 
-  // One line per expected server: a project-scope entry and its local-scope twin are
-  // the same server, not two.
   const linesByName = new Map<string, string>()
   for (const line of lines) {
     const name = line.match(/^([a-zA-Z0-9._:-]+):/)?.[1]
     if (name !== undefined && !linesByName.has(name)) linesByName.set(name, line)
   }
   const managedLines = expectedServerNames
-    .map((name) => linesByName.get(name) ?? linesByName.get(`agents__${name}`))
+    .map((name) => linesByName.get(name) ?? linesByName.get(`agents__${name}`) ?? linesByName.get(toProjectScopedName(projectRoot, name)))
     .filter((line): line is string => line !== undefined)
 
   const managed = managedLines.length
