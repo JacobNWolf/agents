@@ -159,7 +159,7 @@ describe('status command', () => {
     expect(parsed.probes.antigravity_skills).toMatch(/^\d+ skill\(s\) in flat copy bridge$/)
   }, 20_000)
 
-  it('recognizes this project user-scope Claude entries in runtime status', async () => {
+  it.each(['scoped', 'plain', 'local'])('recognizes %s Claude names for user scope in runtime status', async nameKind => {
     const projectRoot = await mkdtemp(path.join(os.tmpdir(), 'agents-status-user-'))
     tempDirs.push(projectRoot)
     await runInit({ projectRoot, force: true })
@@ -169,13 +169,41 @@ describe('status command', () => {
     config.mcp.servers = { docs: { transport: 'http', url: 'https://example.com/mcp' } }
     await saveAgentsConfig(projectRoot, config)
     vi.spyOn(shell, 'commandExists').mockImplementation(command => command === 'claude')
+    let serverName = toProjectScopedName(projectRoot, 'docs')
+    if (nameKind === 'plain') serverName = 'docs'
+    else if (nameKind === 'local') serverName = 'agents__docs'
     vi.spyOn(shell, 'runCommand').mockReturnValue({
       ok: true, code: 0, stderr: '', timedOut: false,
-      stdout: `${toProjectScopedName(projectRoot, 'docs')}: https://example.com/mcp - ✓ Connected`
+      stdout: `${serverName}: https://example.com/mcp - ✓ Connected`
     })
     const output = await captureStdout(() => runStatus({ projectRoot, json: true, verbose: false, fast: false }))
     const parsed = JSON.parse(output) as { probes: Record<string, string> }
     expect(parsed.probes.claude).toBe('1/1 MCP server(s) detected')
+  })
+
+  it.each(['user', 'project', 'local'] as const)('uses the health of the preferred Claude entry for %s scope', async scope => {
+    const projectRoot = await mkdtemp(path.join(os.tmpdir(), 'agents-status-precedence-'))
+    tempDirs.push(projectRoot)
+    await runInit({ projectRoot, force: true })
+    const config = await loadAgentsConfig(projectRoot)
+    config.integrations.enabled = ['claude']
+    config.integrations.options.claudeScope = scope
+    config.mcp.servers = { docs: { transport: 'http', url: 'https://example.com/mcp' } }
+    await saveAgentsConfig(projectRoot, config)
+    vi.spyOn(shell, 'commandExists').mockImplementation(command => command === 'claude')
+    vi.spyOn(shell, 'runCommand').mockReturnValue({
+      ok: true, code: 0, stderr: '', timedOut: false,
+      stdout: [
+        'docs: https://example.com/mcp - ✗ Failed to connect',
+        'agents__docs: https://example.com/mcp - ✓ Connected',
+        `${toProjectScopedName(projectRoot, 'docs')}: https://example.com/mcp - ✓ Connected`
+      ].join('\n')
+    })
+    const output = await captureStdout(() => runStatus({ projectRoot, json: true, verbose: false, fast: false }))
+    const parsed = JSON.parse(output) as { probes: Record<string, string> }
+    let expected = '1/1 MCP server(s), 1 unhealthy'
+    if (scope === 'user') expected = '1/1 MCP server(s) detected'
+    expect(parsed.probes.claude).toBe(expected)
   })
 
   it('includes root CLAUDE.md file state when Claude is enabled', async () => {
